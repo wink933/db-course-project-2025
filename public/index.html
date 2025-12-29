@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MediArchive Pro</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <div class="brand-logo">MA</div>
+      <div>
+        <h1>MediArchive Pro</h1>
+        <p class="subtitle">个人媒体资产管理中心</p>
+      </div>
+    </div>
+    <div class="search-bar">
+      <input id="searchInput" type="text" placeholder="搜索标题/备注/路径" />
+      <select id="mediaTypeFilter">
+        <option value="">全部类型</option>
+        <option value="Video">视频</option>
+        <option value="Image">图片</option>
+        <option value="Doc">文档</option>
+        <option value="Web">网页</option>
+      </select>
+      <select id="tagFilter">
+        <option value="">全部标签</option>
+      </select>
+      <select id="deviceFilter">
+        <option value="">全部设备</option>
+      </select>
+      <button id="searchBtn">搜索</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section>
+        <h2>文件夹</h2>
+        <ul id="folderList" class="tree"></ul>
+        <div class="form-row">
+          <input id="folderNameInput" type="text" placeholder="新文件夹名称" />
+          <select id="folderParentSelect"></select>
+          <button id="addFolderBtn">新增</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>设备</h2>
+        <ul id="deviceList" class="flat"></ul>
+        <div class="form-row">
+          <input id="deviceNameInput" type="text" placeholder="设备名称" />
+          <input id="deviceTypeInput" type="text" placeholder="类型 (PC/Mobile)" />
+          <button id="addDeviceBtn">新增</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>标签</h2>
+        <ul id="tagList" class="flat"></ul>
+        <div class="form-row">
+          <input id="tagNameInput" type="text" placeholder="新标签" />
+          <button id="addTagBtn">新增</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>同步</h2>
+        <div class="form-row">
+          <input id="syncEndpointInput" type="text" placeholder="对端地址，例如 http://192.168.0.5:3000" />
+          <button id="syncBtn">同步元数据</button>
+        </div>
+        <div class="form-row">
+          <button id="refreshAvailabilityBtn" class="secondary">刷新本地可用性</button>
+        </div>
+        <p class="hint">提示：确保双方在同一局域网，且对端服务已启动。</p>
+      </section>
+    </aside>
+
+    <section class="content">
+      <div class="card">
+        <h2>新增资源</h2>
+        <div class="grid-2">
+          <label>
+            标题
+            <input id="mediaTitleInput" type="text" />
+          </label>
+          <label>
+            类型
+            <select id="mediaTypeInput">
+              <option value="Video">视频</option>
+              <option value="Image">图片</option>
+              <option value="Doc">文档</option>
+              <option value="Web">网页</option>
+            </select>
+          </label>
+          <label>
+            文件夹
+            <select id="mediaFolderInput"></select>
+          </label>
+          <label>
+            标签 (逗号分隔)
+            <input id="mediaTagsInput" type="text" />
+          </label>
+          <label>
+            资源类型
+            <select id="storageTypeInput">
+              <option value="Local">本地文件</option>
+              <option value="Web">网络链接</option>
+            </select>
+          </label>
+          <label>
+            路径 / URL
+            <input id="mediaPathInput" type="text" />
+          </label>
+          <label>
+            设备
+            <select id="mediaDeviceInput"></select>
+          </label>
+          <label>
+            访问备注
+            <input id="mediaAccessInput" type="text" placeholder="如需VPN/账号信息" />
+          </label>
+          <label class="full">
+            备注
+            <textarea id="mediaDescriptionInput" rows="3"></textarea>
+          </label>
+        </div>
+        <button id="addMediaBtn">保存资源</button>
+      </div>
+
+      <div class="card">
+        <h2>资源列表</h2>
+        <table class="media-table">
+          <thead>
+            <tr>
+              <th>标题</th>
+              <th>类型</th>
+              <th>文件夹</th>
+              <th>标签</th>
+              <th>位置</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="mediaTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
