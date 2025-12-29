@@ -149,6 +149,82 @@
     </section>
   </main>
 
+  <div id="dropOverlay" class="drop-overlay hidden">
+    <div class="drop-overlay-inner">释放文件以导入</div>
+  </div>
+
+  <div id="folderContextMenu" class="context-menu hidden">
+    <button data-action="rename">重命名</button>
+    <button data-action="delete" class="danger">删除</button>
+  </div>
+
+  <div id="editModal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>编辑资源</h3>
+        <button id="closeEditModal" class="modal-close">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="grid-2">
+          <label>
+            标题
+            <input id="editTitleInput" type="text" />
+          </label>
+          <label>
+            类型
+            <select id="editMediaTypeInput">
+              <option value="Video">视频</option>
+              <option value="Image">图片</option>
+              <option value="Doc">文档</option>
+              <option value="Web">网页</option>
+            </select>
+          </label>
+          <label>
+            文件夹
+            <select id="editMediaFolderInput"></select>
+          </label>
+          <label>
+            标签 (逗号分隔)
+            <input id="editMediaTagsInput" type="text" />
+          </label>
+          <label class="full">
+            备注
+            <textarea id="editMediaDescriptionInput" rows="3"></textarea>
+          </label>
+        </div>
+
+        <div class="subsection">
+          <div class="subsection-title">为该资源新增位置（可选）</div>
+          <div class="grid-2">
+            <label>
+              资源类型
+              <select id="editStorageTypeInput">
+                <option value="Local">本地文件</option>
+                <option value="Web">网络链接</option>
+              </select>
+            </label>
+            <label>
+              设备
+              <select id="editMediaDeviceInput"></select>
+            </label>
+            <label class="full">
+              路径 / URL
+              <input id="editMediaPathInput" type="text" placeholder="可选，留空则不新增" />
+            </label>
+            <label class="full">
+              访问备注
+              <input id="editMediaAccessInput" type="text" placeholder="如需 VPN 或账号信息" />
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="saveEditBtn">保存</button>
+      </div>
+    </div>
+  </div>
+
   <script src="app.js"></script>
 </body>
 </html>

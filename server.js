@@ -193,6 +193,32 @@ app.post('/api/folders', (req, res) => {
   res.json({ folder_id: folderId });
 });
 
+app.patch('/api/folders/:id', (req, res) => {
+  const { id } = req.params;
+  const { folderName } = req.body;
+  if (!folderName) {
+    res.status(400).json({ error: 'Missing folderName' });
+    return;
+  }
+  db.prepare(`
+    UPDATE folders
+    SET folder_name = ?, updated_at = ?
+    WHERE folder_id = ?
+  `).run(folderName, now(), id);
+  res.json({ ok: true });
+});
+
+app.delete('/api/folders/:id', (req, res) => {
+  const { id } = req.params;
+  const child = db.prepare('SELECT folder_id FROM folders WHERE parent_id = ? LIMIT 1').get(id);
+  if (child) {
+    res.status(400).json({ error: 'Folder has children' });
+    return;
+  }
+  db.prepare('DELETE FROM folders WHERE folder_id = ?').run(id);
+  res.json({ ok: true });
+});
+
 app.post('/api/tags', (req, res) => {
   const userId = getOwnerId();
   const { tagName } = req.body;
