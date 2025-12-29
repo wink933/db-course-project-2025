@@ -5,11 +5,17 @@ const Database = require('better-sqlite3');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
-const dbPath = path.join(__dirname, 'db', 'media-archive.db');
+const dbPath = process.env.DB_PATH
+  ? path.resolve(process.env.DB_PATH)
+  : path.join(__dirname, 'db', 'media-archive.db');
 const schemaPath = path.join(__dirname, 'db', 'schema.sql');
 let serverInstance = null;
 
 function initializeDatabase() {
+  const dbDir = path.dirname(dbPath);
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
   const db = new Database(dbPath);
   db.pragma('foreign_keys = ON');
   const schema = fs.readFileSync(schemaPath, 'utf8');

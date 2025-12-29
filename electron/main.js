@@ -1,6 +1,5 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
-const { startServer, stopServer, closeDatabase } = require('../server');
 
 const DEFAULT_PORT = process.env.ELECTRON_PORT || process.env.PORT || 4000;
 let mainWindow;
@@ -22,6 +21,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  const userDataPath = app.getPath('userData');
+  process.env.DB_PATH = path.join(userDataPath, 'media-archive.db');
+  const { startServer, stopServer, closeDatabase } = require('../server');
   const server = startServer({ port: DEFAULT_PORT });
   server.on('listening', () => {
     createWindow();
@@ -32,11 +34,11 @@ app.whenReady().then(() => {
       createWindow();
     }
   });
-});
 
-app.on('before-quit', () => {
-  stopServer();
-  closeDatabase();
+  app.on('before-quit', () => {
+    stopServer();
+    closeDatabase();
+  });
 });
 
 app.on('window-all-closed', () => {

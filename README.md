@@ -169,6 +169,7 @@ npm run electron:dist
 ### 注意事项
 
 - Electron 会在后台启动本地服务并加载 `http://localhost:4000`。
+- 桌面版数据库文件会存放在系统用户数据目录（如 macOS 的 `~/Library/Application Support/MediArchive Pro/`）。
 - 如需更换端口，可在运行时设置：
   ```bash
   ELECTRON_PORT=4000 npm run electron:dev
