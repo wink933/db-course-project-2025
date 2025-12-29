@@ -7,6 +7,7 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const dbPath = path.join(__dirname, 'db', 'media-archive.db');
 const schemaPath = path.join(__dirname, 'db', 'schema.sql');
+let serverInstance = null;
 
 function initializeDatabase() {
   const db = new Database(dbPath);
@@ -369,6 +370,37 @@ app.get('/api/health', (req, res) => {
 });
 
 const port = process.env.PORT || 4000;
-app.listen(port, () => {
-  console.log(`MediArchive Pro running at http://localhost:${port}`);
-});
+
+function startServer(options = {}) {
+  if (serverInstance) {
+    return serverInstance;
+  }
+  const resolvedPort = options.port || port;
+  serverInstance = app.listen(resolvedPort, () => {
+    console.log(`MediArchive Pro running at http://localhost:${resolvedPort}`);
+  });
+  return serverInstance;
+}
+
+function stopServer() {
+  if (!serverInstance) return;
+  serverInstance.close(() => {
+    serverInstance = null;
+  });
+}
+
+function closeDatabase() {
+  db.close();
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = {
+  app,
+  db,
+  startServer,
+  stopServer,
+  closeDatabase
+};

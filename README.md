@@ -117,7 +117,7 @@ npm start
 启动后访问：
 
 ```
-http://localhost:3000
+http://localhost:4000
 ```
 
 ## VSCode 验收流程（可运行项目）
@@ -127,7 +127,7 @@ http://localhost:3000
 
 2. **启动服务**
    - 打开终端，执行 `npm install`、`npm run init-db`、`npm start`。
-   - 访问 `http://localhost:3000` 查看界面。
+   - 访问 `http://localhost:4000` 查看界面。
 
 3. **功能验收要点**
    - 新增设备与标签。
@@ -143,7 +143,36 @@ http://localhost:3000
 
 - 在两台设备上分别启动项目。
 - 确保在同一局域网内。
-- 在任一设备的“同步”区域输入对端地址（例如 `http://192.168.0.5:3000`）并点击同步。
+- 在任一设备的“同步”区域输入对端地址（例如 `http://192.168.0.5:4000`）并点击同步。
+
+## Electron 打包与桌面应用运行
+
+> 适用于：无需对方安装 Node.js，直接给安装包使用的场景。
+
+### 运行桌面版（开发模式）
+
+```bash
+npm install
+npm run init-db
+npm run electron:dev
+```
+
+### 打包桌面安装包
+
+```bash
+npm install
+npm run electron:dist
+```
+
+打包输出在 `dist/` 目录下（Windows/macOS/Linux 会生成对应安装包）。
+
+### 注意事项
+
+- Electron 会在后台启动本地服务并加载 `http://localhost:4000`。
+- 如需更换端口，可在运行时设置：
+  ```bash
+  ELECTRON_PORT=4000 npm run electron:dev
+  ```
 
 ## 说明
 
