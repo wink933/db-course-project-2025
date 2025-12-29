@@ -1,0 +1,16 @@
+{
+  "name": "media-archive-pro",
+  "version": "1.0.0",
+  "description": "MediArchive Pro - personal media asset manager",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "init-db": "node scripts/init-db.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.19.2",
+    "uuid": "^9.0.1"
+  }
+}

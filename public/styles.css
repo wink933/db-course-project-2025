@@ -1,0 +1,174 @@
+body {
+  margin: 0;
+  font-family: "Segoe UI", "PingFang SC", sans-serif;
+  background: #f5f7fb;
+  color: #1f2a44;
+}
+
+.app-header {
+  background: #2f3a56;
+  color: #fff;
+  padding: 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.search-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.search-bar input,
+.search-bar select,
+.search-bar button {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #cbd3e3;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  min-height: calc(100vh - 80px);
+}
+
+.sidebar {
+  background: #ffffff;
+  border-right: 1px solid #e3e8f0;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.sidebar h2 {
+  margin: 0 0 8px 0;
+  font-size: 16px;
+}
+
+.tree,
+.flat {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tree li,
+.flat li {
+  padding: 6px 8px;
+  background: #f0f3fa;
+  border-radius: 6px;
+}
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-row input,
+.form-row select,
+.form-row button {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #cbd3e3;
+}
+
+.content {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: 0 4px 10px rgba(31, 42, 68, 0.08);
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.grid-2 label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.grid-2 input,
+.grid-2 select,
+.grid-2 textarea {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid #cbd3e3;
+}
+
+.grid-2 .full {
+  grid-column: 1 / -1;
+}
+
+.media-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.media-table th,
+.media-table td {
+  border-bottom: 1px solid #e3e8f0;
+  text-align: left;
+  padding: 8px;
+  vertical-align: top;
+}
+
+.media-table th {
+  background: #f0f3fa;
+}
+
+button {
+  background: #3f5ce5;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #2f47b8;
+}
+
+button.secondary {
+  background: #6b7280;
+}
+
+button.secondary:hover {
+  background: #4b5563;
+}
+
+button.danger {
+  background: #dc2626;
+}
+
+button.danger:hover {
+  background: #b91c1c;
+}
+
+.hint {
+  font-size: 12px;
+  color: #6b7280;
+  margin: 0;
+}
