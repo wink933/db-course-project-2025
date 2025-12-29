@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediArchive Pro - ER Diagram</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .diagram-container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            width: 95%;
+            max-width: 1400px;
+            overflow-x: auto;
+            display: flex;
+            justify-content: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>MediArchive Pro - 概念结构设计 (E-R图)</h1>
+    <div class="diagram-container">
+        <div class="mermaid">
+            erDiagram
+                User ||--o{ Device : owns
+                User ||--o{ MediaItem : owns
+                User ||--o{ Folder : manages
+                User ||--o{ Tag : creates
+
+                Folder ||--o{ Folder : contains_subfolders
+                Folder ||--o{ MediaItem : contains
+
+                MediaItem ||--|{ StorageLocation : has_instances
+                MediaItem }|--|{ Tag : labeled_with
+
+                Device ||--o{ StorageLocation : stores
+                
+                User {
+                    uuid user_id PK "用户ID"
+                    string username "用户名"
+                    datetime created_at "注册时间"
+                }
+
+                Device {
+                    uuid device_id PK "设备ID"
+                    string device_name "设备名称"
+                    string device_type "设备类型"
+                    datetime last_sync_time "最后同步时间"
+                    uuid user_id FK "所属用户"
+                }
+
+                Folder {
+                    uuid folder_id PK "文件夹ID"
+                    string folder_name "文件夹名"
+                    uuid parent_id FK "父文件夹ID"
+                }
+
+                MediaItem {
+                    uuid item_id PK "媒体ID"
+                    string title "标题"
+                    string media_type "媒体类型"
+                    string description "备注"
+                    uuid folder_id FK "所属文件夹"
+                    uuid user_id FK "所属用户"
+                }
+
+                StorageLocation {
+                    uuid location_id PK "位置ID"
+                    string storage_type "存储类型(Local/Web)"
+                    string path_or_url "路径或URL"
+                    string access_info "访问备注"
+                    uuid item_id FK "所属媒体"
+                    uuid device_id FK "所属设备(Web可空)"
+                }
+
+                Tag {
+                    uuid tag_id PK "标签ID"
+                    string tag_name "标签名"
+                }
+        </div>
+    </div>
+    <script>
+        mermaid.initialize({ 
+            startOnLoad: true, 
+            theme: 'default',
+            securityLevel: 'loose',
+            er: {
+                useMaxWidth: false
+            }
+        });
+    </script>
+</body>
+</html>
