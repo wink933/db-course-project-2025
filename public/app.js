@@ -93,15 +93,27 @@ function renderMediaTable() {
   elements.mediaTableBody.innerHTML = '';
   const folderMap = Object.fromEntries(state.folders.map((folder) => [folder.folder_id, folder.folder_name]));
 
+  const formatLocation = (loc) => {
+    if (!loc || !loc.path) return '';
+    const isWeb = loc.storage_type === 'Web' || /^https?:\/\//i.test(loc.path);
+    const status = loc.storage_type === 'Local'
+      ? (loc.is_available ? '可用' : '不可用')
+      : '在线';
+
+    if (isWeb) {
+      const safeUrl = loc.path;
+      return `<a class="link-web" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeUrl}</a> (${status})`;
+    }
+
+    const downloadUrl = `/api/file?path=${encodeURIComponent(loc.path)}`;
+    const display = loc.path;
+    return `<a class="link-local" href="${downloadUrl}" download>${display}</a> (${status})`;
+  };
+
   state.media.forEach((item) => {
     const tr = document.createElement('tr');
     const tagNames = item.tags.map((tag) => tag.tag_name).join(', ');
-    const locations = item.locations.map((loc) => {
-      const status = loc.storage_type === 'Local'
-        ? (loc.is_available ? '可用' : '不可用')
-        : '在线';
-      return `${loc.storage_type}: ${loc.path} (${status})`;
-    }).join('<br />');
+    const locations = item.locations.map((loc) => formatLocation(loc)).join('<br />');
 
     tr.innerHTML = `
       <td>${item.title}</td>

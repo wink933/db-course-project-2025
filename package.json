@@ -2,12 +2,12 @@
   "name": "media-archive-pro",
   "version": "1.0.0",
   "description": "MediArchive Pro - personal media asset manager",
-  "main": "server.js",
+  "main": "electron/main.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
     "init-db": "node scripts/init-db.js",
-    "electron:dev": "ELECTRON_PORT=3000 electron electron/main.js",
+    "electron:dev": "ELECTRON_PORT=4000 electron electron/main.js",
     "electron:pack": "electron-builder --dir",
     "electron:dist": "electron-builder"
   },
