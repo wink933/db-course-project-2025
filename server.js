@@ -200,11 +200,15 @@ app.patch('/api/folders/:id', (req, res) => {
     res.status(400).json({ error: 'Missing folderName' });
     return;
   }
-  db.prepare(`
+  const info = db.prepare(`
     UPDATE folders
     SET folder_name = ?, updated_at = ?
     WHERE folder_id = ?
   `).run(folderName, now(), id);
+  if (!info || info.changes === 0) {
+    res.status(404).json({ error: 'Folder not found' });
+    return;
+  }
   res.json({ ok: true });
 });
 

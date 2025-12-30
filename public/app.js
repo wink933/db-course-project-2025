@@ -55,6 +55,8 @@ const elements = {
 
 let editingId = null;
 let folderContextTarget = null;
+let renamingFolderId = null;
+let renamingOriginalName = '';
 
 function renderFolderOptions() {
   const options = ['<option value="">未分类</option>'];
@@ -90,22 +92,89 @@ function renderFolders() {
   });
 }
 
-async function promptRenameFolder(targetId) {
+function cancelInlineRename() {
+  if (!renamingFolderId) return;
+  const li = elements.folderList.querySelector(`li[data-id="${renamingFolderId}"]`);
+  if (li) {
+    li.textContent = renamingOriginalName;
+  }
+  renamingFolderId = null;
+  renamingOriginalName = '';
+}
+
+async function commitInlineRename(nextName) {
+  const targetId = renamingFolderId;
+  const originalName = renamingOriginalName;
+  renamingFolderId = null;
+  renamingOriginalName = '';
+
+  const trimmed = (nextName || '').trim();
   if (!targetId) return;
-  const newName = window.prompt('输入新的文件夹名称');
-  if (!newName || !newName.trim()) return;
-  const res = await fetch(`/api/folders/${targetId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ folderName: newName.trim() })
-  });
-  if (!res.ok) {
-    const msg = await res.json().catch(() => ({}));
-    alert(msg.error || '重命名失败');
+  if (!trimmed || trimmed === originalName) {
+    await fetchBootstrap();
     return;
   }
-  await fetchBootstrap();
-  await fetchMedia();
+
+  try {
+    const res = await fetch(`/api/folders/${targetId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderName: trimmed })
+    });
+    if (!res.ok) {
+      const msg = await res.json().catch(() => ({}));
+      alert(msg.error || '重命名失败');
+      await fetchBootstrap();
+      return;
+    }
+    await fetchBootstrap();
+    await fetchMedia();
+  } catch (error) {
+    alert(`重命名请求失败：${error?.message || '网络错误'}`);
+    await fetchBootstrap();
+  }
+}
+
+function startInlineRenameFolder(targetId) {
+  if (!targetId) return;
+  if (renamingFolderId && renamingFolderId !== targetId) {
+    cancelInlineRename();
+  }
+
+  const li = elements.folderList.querySelector(`li[data-id="${targetId}"]`);
+  if (!li) return;
+
+  renamingFolderId = targetId;
+  renamingOriginalName = li.textContent || '';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'folder-rename-input';
+  input.value = renamingOriginalName;
+
+  li.textContent = '';
+  li.appendChild(input);
+
+  input.focus();
+  input.select();
+
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('contextmenu', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitInlineRename(input.value);
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelInlineRename();
+    }
+    e.stopPropagation();
+  });
+  input.addEventListener('blur', () => {
+    if (!renamingFolderId) return;
+    commitInlineRename(input.value);
+  });
 }
 
 function renderDevices() {
@@ -449,7 +518,7 @@ function bindEvents() {
   elements.folderList.addEventListener('dblclick', (e) => {
     const target = e.target.closest('li[data-id]');
     if (!target) return;
-    promptRenameFolder(target.dataset.id);
+    startInlineRenameFolder(target.dataset.id);
   });
 
   document.addEventListener('paste', async (e) => {
@@ -485,14 +554,27 @@ function bindEvents() {
     }
   });
 
+  document.addEventListener('click', (e) => {
+    const renameInput = elements.folderList.querySelector('.folder-rename-input');
+    if (!renameInput) return;
+    if (elements.folderContextMenu.contains(e.target)) return;
+    if (!renameInput.contains(e.target)) {
+      renameInput.blur();
+    }
+  });
+
   elements.folderContextMenu.addEventListener('click', async (e) => {
-    const action = e.target.dataset.action;
+    const btn = e.target.closest('button[data-action]');
+    const action = btn ? btn.dataset.action : null;
     const targetId = folderContextTarget;
     if (!action || !targetId) return;
     if (action === 'rename') {
-      await promptRenameFolder(targetId);
+      hideFolderContextMenu();
+      setTimeout(() => startInlineRenameFolder(targetId), 0);
+      return;
     }
     if (action === 'delete') {
+      cancelInlineRename();
       const ok = window.confirm('确定删除该文件夹？如有子文件夹将无法删除');
       if (ok) {
         const res = await fetch(`/api/folders/${targetId}`, { method: 'DELETE' });

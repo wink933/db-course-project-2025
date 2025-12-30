@@ -17,8 +17,10 @@
     "uuid": "^9.0.1"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.0.2",
     "electron": "^30.0.8",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "electron-rebuild": "^3.2.9"
   },
   "build": {
     "appId": "com.course.media-archive",
