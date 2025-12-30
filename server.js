@@ -1,6 +1,8 @@
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const contentDisposition = require('content-disposition');
+const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
 const { v4: uuidv4 } = require('uuid');
 
@@ -11,6 +13,37 @@ const dbPath = process.env.DB_PATH
 const schemaPath = path.join(__dirname, 'db', 'schema.sql');
 let serverInstance = null;
 
+function columnExists(db, tableName, columnName) {
+  const rows = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  return rows.some((r) => r && r.name === columnName);
+}
+
+function ensureFolderSortOrder(db) {
+  const hasSortOrder = columnExists(db, 'folders', 'sort_order');
+  if (!hasSortOrder) {
+    db.exec('ALTER TABLE folders ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0');
+  }
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_folders_user_parent_sort ON folders(user_id, parent_id, sort_order)');
+
+  const hasNonZero = db.prepare('SELECT folder_id FROM folders WHERE sort_order != 0 LIMIT 1').get();
+  if (hasNonZero) return;
+
+  const parents = db.prepare('SELECT DISTINCT parent_id FROM folders').all();
+  const updateStmt = db.prepare('UPDATE folders SET sort_order = ?, updated_at = ? WHERE folder_id = ?');
+  const tx = db.transaction(() => {
+    parents.forEach(({ parent_id }) => {
+      const siblings = db
+        .prepare('SELECT folder_id FROM folders WHERE parent_id IS ? ORDER BY created_at, folder_id')
+        .all(parent_id ?? null);
+      siblings.forEach((row, index) => {
+        updateStmt.run(index, now(), row.folder_id);
+      });
+    });
+  });
+  tx();
+}
+
 function initializeDatabase() {
   const dbDir = path.dirname(dbPath);
   if (!fs.existsSync(dbDir)) {
@@ -20,6 +53,8 @@ function initializeDatabase() {
   db.pragma('foreign_keys = ON');
   const schema = fs.readFileSync(schemaPath, 'utf8');
   db.exec(schema);
+
+  ensureFolderSortOrder(db);
 
   const existing = db.prepare('SELECT user_id FROM users LIMIT 1').get();
   if (!existing) {
@@ -44,6 +79,56 @@ const db = initializeDatabase();
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+function findLocalLocationByPath(candidatePath) {
+  if (!candidatePath) return null;
+  const normalized = path.normalize(candidatePath);
+  if (!path.isAbsolute(normalized)) return null;
+
+  let realPath = normalized;
+  try {
+    realPath = fs.realpathSync.native(normalized);
+  } catch {
+    // ignore
+  }
+
+  const row = db.prepare(`
+    SELECT *
+    FROM storage_locations
+    WHERE storage_type = 'Local'
+      AND (path = ? OR path = ?)
+    LIMIT 1
+  `).get(normalized, realPath);
+
+  if (!row) return null;
+  return { location: row, normalized, realPath };
+}
+
+function ensureFileExists(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
+function openWithDefaultApp(targetPath) {
+  const platform = process.platform;
+  if (platform === 'darwin') {
+    const child = spawn('open', [targetPath], { detached: true, stdio: 'ignore' });
+    child.unref();
+    return;
+  }
+  if (platform === 'win32') {
+    const quoted = `"${targetPath}"`;
+    const child = spawn('cmd', ['/c', 'start', '', quoted], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+    return;
+  }
+  const child = spawn('xdg-open', [targetPath], { detached: true, stdio: 'ignore' });
+  child.unref();
+}
+
 app.get('/api/file', (req, res) => {
   const target = req.query.path;
   if (!target) {
@@ -51,18 +136,211 @@ app.get('/api/file', (req, res) => {
     return;
   }
 
-  const normalized = path.normalize(target);
-  if (!path.isAbsolute(normalized)) {
-    res.status(400).json({ error: 'Path must be absolute' });
+  const found = findLocalLocationByPath(target);
+  if (!found) {
+    res.status(403).json({ error: 'Path not registered' });
     return;
   }
 
-  if (!fs.existsSync(normalized)) {
+  const candidate = ensureFileExists(found.realPath) ? found.realPath : found.normalized;
+  if (!ensureFileExists(candidate)) {
     res.status(404).json({ error: 'File not found' });
     return;
   }
 
-  res.download(normalized, path.basename(normalized));
+  res.download(candidate, path.basename(candidate));
+});
+
+app.get('/api/file/view', (req, res) => {
+  const target = req.query.path;
+  if (!target) {
+    res.status(400).json({ error: 'Missing path' });
+    return;
+  }
+
+  const found = findLocalLocationByPath(target);
+  if (!found) {
+    res.status(403).json({ error: 'Path not registered' });
+    return;
+  }
+
+  const candidate = ensureFileExists(found.realPath) ? found.realPath : found.normalized;
+  if (!ensureFileExists(candidate)) {
+    res.status(404).json({ error: 'File not found' });
+    return;
+  }
+
+  res.setHeader('Content-Disposition', contentDisposition(path.basename(candidate), { type: 'inline' }));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(candidate);
+});
+
+app.get('/api/media/:itemId/preview', (req, res) => {
+  const { itemId } = req.params;
+  const { locationId } = req.query;
+  if (!itemId) {
+    res.status(400).json({ error: 'Missing itemId' });
+    return;
+  }
+
+  let location;
+  if (locationId) {
+    location = db.prepare(`
+      SELECT *
+      FROM storage_locations
+      WHERE location_id = ? AND item_id = ? AND storage_type = 'Local'
+      LIMIT 1
+    `).get(locationId, itemId);
+  } else {
+    location = db.prepare(`
+      SELECT *
+      FROM storage_locations
+      WHERE item_id = ? AND storage_type = 'Local'
+      ORDER BY is_available DESC, created_at ASC
+      LIMIT 1
+    `).get(itemId);
+  }
+
+  if (!location) {
+    res.status(404).json({ error: 'No local location for item' });
+    return;
+  }
+
+  const normalized = path.normalize(location.path);
+  if (!path.isAbsolute(normalized)) {
+    res.status(400).json({ error: 'Invalid stored path' });
+    return;
+  }
+
+  let candidate = normalized;
+  try {
+    const realPath = fs.realpathSync.native(normalized);
+    if (ensureFileExists(realPath)) candidate = realPath;
+  } catch {
+    // ignore
+  }
+
+  if (!ensureFileExists(candidate)) {
+    res.status(404).json({ error: 'File not found' });
+    return;
+  }
+
+  res.setHeader('Content-Disposition', contentDisposition(path.basename(candidate), { type: 'inline' }));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(candidate);
+});
+
+app.get('/api/media/:itemId/download', (req, res) => {
+  const { itemId } = req.params;
+  const { locationId } = req.query;
+  if (!itemId) {
+    res.status(400).json({ error: 'Missing itemId' });
+    return;
+  }
+
+  let location;
+  if (locationId) {
+    location = db.prepare(`
+      SELECT *
+      FROM storage_locations
+      WHERE location_id = ? AND item_id = ? AND storage_type = 'Local'
+      LIMIT 1
+    `).get(locationId, itemId);
+  } else {
+    location = db.prepare(`
+      SELECT *
+      FROM storage_locations
+      WHERE item_id = ? AND storage_type = 'Local'
+      ORDER BY is_available DESC, created_at ASC
+      LIMIT 1
+    `).get(itemId);
+  }
+
+  if (!location) {
+    res.status(404).json({ error: 'No local location for item' });
+    return;
+  }
+
+  const normalized = path.normalize(location.path);
+  if (!path.isAbsolute(normalized)) {
+    res.status(400).json({ error: 'Invalid stored path' });
+    return;
+  }
+
+  let candidate = normalized;
+  try {
+    const realPath = fs.realpathSync.native(normalized);
+    if (ensureFileExists(realPath)) candidate = realPath;
+  } catch {
+    // ignore
+  }
+
+  if (!ensureFileExists(candidate)) {
+    res.status(404).json({ error: 'File not found' });
+    return;
+  }
+
+  res.setHeader('Content-Disposition', contentDisposition(path.basename(candidate), { type: 'attachment' }));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.sendFile(candidate);
+});
+
+app.post('/api/media/:itemId/open', (req, res) => {
+  const { itemId } = req.params;
+  const { locationId } = req.query;
+  if (!itemId) {
+    res.status(400).json({ error: 'Missing itemId' });
+    return;
+  }
+
+  let location;
+  if (locationId) {
+    location = db.prepare(`
+      SELECT *
+      FROM storage_locations
+      WHERE location_id = ? AND item_id = ? AND storage_type = 'Local'
+      LIMIT 1
+    `).get(locationId, itemId);
+  } else {
+    location = db.prepare(`
+      SELECT *
+      FROM storage_locations
+      WHERE item_id = ? AND storage_type = 'Local'
+      ORDER BY is_available DESC, created_at ASC
+      LIMIT 1
+    `).get(itemId);
+  }
+
+  if (!location) {
+    res.status(404).json({ error: 'No local location for item' });
+    return;
+  }
+
+  const normalized = path.normalize(location.path);
+  if (!path.isAbsolute(normalized)) {
+    res.status(400).json({ error: 'Invalid stored path' });
+    return;
+  }
+
+  let candidate = normalized;
+  try {
+    const realPath = fs.realpathSync.native(normalized);
+    if (ensureFileExists(realPath)) candidate = realPath;
+  } catch {
+    // ignore
+  }
+
+  if (!ensureFileExists(candidate)) {
+    res.status(404).json({ error: 'File not found' });
+    return;
+  }
+
+  try {
+    openWithDefaultApp(candidate);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error?.message || 'Failed to open file' });
+  }
 });
 
 function now() {
@@ -104,7 +382,12 @@ app.get('/api/bootstrap', (req, res) => {
   const userId = getOwnerId();
   const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
   const devices = db.prepare('SELECT * FROM devices WHERE user_id = ? ORDER BY created_at').all(userId);
-  const folders = db.prepare('SELECT * FROM folders WHERE user_id = ? ORDER BY created_at').all(userId);
+  const folders = db.prepare(`
+    SELECT *
+    FROM folders
+    WHERE user_id = ?
+    ORDER BY (parent_id IS NOT NULL) ASC, parent_id, sort_order, created_at
+  `).all(userId);
   const tags = db.prepare('SELECT * FROM tags WHERE user_id = ? ORDER BY tag_name').all(userId);
   res.json({ user, devices, folders, tags });
 });
@@ -117,8 +400,8 @@ app.get('/api/media', (req, res) => {
   const params = [userId];
 
   if (search) {
-    filters.push('(m.title LIKE ? OR m.description LIKE ? OR sl.path LIKE ?)');
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    filters.push('(m.title LIKE ? OR m.description LIKE ? OR sl.path LIKE ? OR t.tag_name LIKE ?)');
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
   }
   if (folderId) {
     filters.push('m.folder_id = ?');
@@ -149,6 +432,7 @@ app.get('/api/media', (req, res) => {
     FROM media_items m
     LEFT JOIN storage_locations sl ON sl.item_id = m.item_id
     LEFT JOIN media_tags mt ON mt.item_id = m.item_id
+    LEFT JOIN tags t ON t.tag_id = mt.tag_id
     WHERE ${filters.join(' AND ')}
     ORDER BY m.created_at DESC
   `;
@@ -185,12 +469,64 @@ app.get('/api/media', (req, res) => {
 app.post('/api/folders', (req, res) => {
   const userId = getOwnerId();
   const { folderName, parentId } = req.body;
+  if (!folderName) {
+    res.status(400).json({ error: 'Missing folderName' });
+    return;
+  }
   const folderId = uuidv4();
+  const resolvedParentId = parentId || null;
+  const nextSortOrderRow = db
+    .prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM folders WHERE user_id = ? AND parent_id IS ?')
+    .get(userId, resolvedParentId);
+  const sortOrder = Number.isFinite(nextSortOrderRow?.next_order) ? nextSortOrderRow.next_order : 0;
   db.prepare(`
-    INSERT INTO folders (folder_id, user_id, parent_id, folder_name, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(folderId, userId, parentId || null, folderName, now(), now());
+    INSERT INTO folders (folder_id, user_id, parent_id, folder_name, sort_order, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(folderId, userId, resolvedParentId, folderName, sortOrder, now(), now());
   res.json({ folder_id: folderId });
+});
+
+app.post('/api/folders/reorder', (req, res) => {
+  const userId = getOwnerId();
+  const { parentId, orderedIds } = req.body;
+
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+    res.status(400).json({ error: 'Missing orderedIds' });
+    return;
+  }
+
+  const unique = Array.from(new Set(orderedIds));
+  if (unique.length !== orderedIds.length) {
+    res.status(400).json({ error: 'Duplicate folder ids' });
+    return;
+  }
+
+  const resolvedParentId = parentId || null;
+  const placeholders = orderedIds.map(() => '?').join(',');
+  const rows = db
+    .prepare(`SELECT folder_id, parent_id FROM folders WHERE user_id = ? AND folder_id IN (${placeholders})`)
+    .all(userId, ...orderedIds);
+
+  if (rows.length !== orderedIds.length) {
+    res.status(404).json({ error: 'One or more folders not found' });
+    return;
+  }
+
+  const wrongParent = rows.find((r) => (r.parent_id || null) !== resolvedParentId);
+  if (wrongParent) {
+    res.status(400).json({ error: 'Folders must share the same parent' });
+    return;
+  }
+
+  const updateStmt = db.prepare('UPDATE folders SET sort_order = ?, updated_at = ? WHERE user_id = ? AND folder_id = ?');
+  const tx = db.transaction(() => {
+    orderedIds.forEach((folderId, index) => {
+      updateStmt.run(index, now(), userId, folderId);
+    });
+  });
+  tx();
+
+  res.json({ ok: true });
 });
 
 app.patch('/api/folders/:id', (req, res) => {
@@ -370,7 +706,7 @@ app.get('/api/sync/export', (req, res) => {
   const payload = {
     users: db.prepare(`SELECT * FROM users WHERE ${filter}`).all(...params),
     devices: db.prepare(`SELECT * FROM devices WHERE ${filter}`).all(...params),
-    folders: db.prepare(`SELECT * FROM folders WHERE ${filter}`).all(...params),
+    folders: db.prepare(`SELECT * FROM folders WHERE ${filter} ORDER BY (parent_id IS NOT NULL) ASC, parent_id, sort_order, created_at`).all(...params),
     tags: db.prepare(`SELECT * FROM tags WHERE ${filter}`).all(...params),
     media_items: db.prepare(`SELECT * FROM media_items WHERE ${filter}`).all(...params),
     storage_locations: db.prepare(`SELECT * FROM storage_locations WHERE ${filter}`).all(...params),
@@ -432,9 +768,11 @@ function startServer(options = {}) {
   if (serverInstance) {
     return serverInstance;
   }
-  const resolvedPort = options.port || port;
+  const resolvedPort = options.port ?? port;
   serverInstance = app.listen(resolvedPort, () => {
-    console.log(`MediArchive Pro running at http://localhost:${resolvedPort}`);
+    const actualPort = serverInstance?.address?.()?.port ?? resolvedPort;
+    serverInstance.port = actualPort;
+    console.log(`MediArchive Pro running at http://localhost:${actualPort}`);
   });
   return serverInstance;
 }

@@ -7,7 +7,9 @@
     "start": "node server.js",
     "dev": "node server.js",
     "init-db": "node scripts/init-db.js",
-    "electron:dev": "ELECTRON_PORT=4000 electron electron/main.js",
+    "rebuild:node": "npm rebuild better-sqlite3",
+    "rebuild:electron": "electron-rebuild -f -w better-sqlite3",
+    "electron:dev": "npm run rebuild:electron && ELECTRON_PORT=4000 electron electron/main.js",
     "electron:pack": "electron-builder --dir",
     "electron:dist": "electron-builder"
   },

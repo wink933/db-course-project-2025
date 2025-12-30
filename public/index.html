@@ -7,80 +7,145 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="app-header">
-    <div class="brand">
-      <div class="brand-logo">MA</div>
-      <div>
-        <h1>MediArchive Pro</h1>
-        <p class="subtitle">个人媒体资产管理中心</p>
+  <div class="app-shell">
+    <aside class="side-panel">
+      <div class="side-brand">
+        <div class="brand-logo">MA</div>
+        <div class="brand-text">
+          <div class="brand-title">MediArchive</div>
+          <div class="brand-subtitle">个人媒体资产管理中心</div>
+        </div>
       </div>
-    </div>
-    <div class="search-bar">
-      <input id="searchInput" type="text" placeholder="搜索标题/备注/路径" />
-      <select id="mediaTypeFilter">
-        <option value="">全部类型</option>
-        <option value="Video">视频</option>
-        <option value="Image">图片</option>
-        <option value="Doc">文档</option>
-        <option value="Web">网页</option>
-      </select>
-      <select id="tagFilter">
-        <option value="">全部标签</option>
-      </select>
-      <select id="deviceFilter">
-        <option value="">全部设备</option>
-      </select>
-      <button id="searchBtn">搜索</button>
-    </div>
-  </header>
 
-  <main class="layout">
-    <aside class="sidebar">
-      <section>
-        <h2>文件夹</h2>
-        <ul id="folderList" class="tree"></ul>
-        <div class="form-row">
+      <section class="side-section">
+        <div class="side-title">库 Library</div>
+        <div id="libraryNav" class="nav-list">
+          <button class="nav-item active" data-library="all">所有项目</button>
+          <button class="nav-item" data-library="recent">最近添加</button>
+          <button class="nav-item" data-library="web">Web 资源</button>
+          <button class="nav-item" data-library="local">本地文件</button>
+        </div>
+      </section>
+
+      <section class="side-section">
+        <div class="side-title">文件夹 Folders</div>
+        <ul id="folderList" class="tree nav-tree"></ul>
+        <div class="form-row compact">
           <input id="folderNameInput" type="text" placeholder="新文件夹名称" />
           <select id="folderParentSelect"></select>
           <button id="addFolderBtn">新增</button>
         </div>
       </section>
 
-      <section>
-        <h2>设备</h2>
-        <ul id="deviceList" class="flat"></ul>
-        <div class="form-row">
+      <section class="side-section side-section-grow">
+        <div class="side-title">设备 Devices</div>
+        <ul id="deviceList" class="flat nav-tree"></ul>
+        <div class="form-row compact">
           <input id="deviceNameInput" type="text" placeholder="设备名称" />
           <input id="deviceTypeInput" type="text" placeholder="类型 (PC/Mobile)" />
           <button id="addDeviceBtn">新增</button>
         </div>
       </section>
 
-      <section>
-        <h2>标签</h2>
-        <ul id="tagList" class="flat"></ul>
-        <div class="form-row">
-          <input id="tagNameInput" type="text" placeholder="新标签" />
-          <button id="addTagBtn">新增</button>
-        </div>
-      </section>
-
-      <section>
-        <h2>同步</h2>
-        <div class="form-row">
-          <input id="syncEndpointInput" type="text" placeholder="对端地址，例如 http://192.168.0.5:3000" />
+      <section class="side-section">
+        <div class="side-title">同步</div>
+        <div class="form-row compact">
+          <input id="syncEndpointInput" type="text" placeholder="对端地址，例如 http://192.168.0.5:4000" />
           <button id="syncBtn">同步元数据</button>
-        </div>
-        <div class="form-row">
           <button id="refreshAvailabilityBtn" class="secondary">刷新本地可用性</button>
         </div>
         <p class="hint">提示：确保双方在同一局域网，且对端服务已启动。</p>
       </section>
     </aside>
 
-    <section class="content">
-      <div class="card">
-        <h2>新增资源</h2>
+    <main class="main-panel">
+      <div class="top-toolbar">
+        <div class="toolbar-search">
+          <div class="search-row">
+            <select id="searchScope" class="scope-select" title="搜索范围">
+              <option value="all">全部</option>
+              <option value="currentFolder">当前文件夹</option>
+              <option value="local">本地</option>
+              <option value="web">网页</option>
+              <option value="device">某设备</option>
+            </select>
+            <select id="searchScopeDevice" class="scope-device-select hidden" title="选择设备"></select>
+            <span class="search-icon">🔍</span>
+            <input id="searchInput" type="text" placeholder="搜索…（支持 tag:旅行 / type:Doc / device:本机 / folder:作业 / date:2025-12-01..2025-12-31）" />
+          </div>
+          <div id="searchChips" class="chips-row" aria-label="筛选条件"></div>
+        </div>
+        <div class="toolbar-actions">
+          <button id="sortBtn" class="secondary toolbar-btn" type="button">排序：最新</button>
+          <button id="viewToggleBtn" class="secondary toolbar-btn" type="button">视图：列表</button>
+          <button id="openAddModalBtn" class="primary">+ 添加资源</button>
+        </div>
+      </div>
+
+      <ul id="mediaList" class="resource-list"></ul>
+    </main>
+
+    <aside class="inspector-panel">
+      <div id="inspectorEmpty" class="inspector-empty">
+        <div class="preview-box">选择一条资源以查看详情</div>
+      </div>
+
+      <div id="inspector" class="inspector hidden">
+        <div class="preview-box" id="previewBox">预览</div>
+
+        <div class="detail-group">
+          <div class="detail-label">标题</div>
+          <div class="detail-row">
+            <div id="detailTitle" class="detail-title"></div>
+            <button id="openEditBtn" class="chip-btn">编辑</button>
+            <button id="deleteBtn" class="chip-btn danger">删除</button>
+          </div>
+        </div>
+
+        <div class="detail-group">
+          <div class="detail-label">存储位置</div>
+          <div id="detailLocations" class="detail-value"></div>
+        </div>
+
+        <div class="detail-group">
+          <div class="detail-label">标签</div>
+          <div id="detailTags" class="tag-wrap"></div>
+          <div id="tagPicker" class="tag-picker"></div>
+          <div class="tag-add">
+            <input id="tagAddInput" type="text" placeholder="输入标签后回车" />
+          </div>
+        </div>
+
+        <div class="detail-group">
+          <div class="detail-label">备注</div>
+          <textarea id="detailNote" class="detail-input" rows="5" placeholder="可选备注..."></textarea>
+        </div>
+
+        <div class="inspector-actions">
+          <button id="openPrimaryBtn" class="primary" disabled>打开</button>
+          <button id="shareBtn" class="secondary" disabled>分享</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div id="dropOverlay" class="drop-overlay hidden">
+    <div class="drop-overlay-inner">释放文件以导入</div>
+  </div>
+
+  <div id="folderContextMenu" class="context-menu hidden">
+    <button data-action="rename">重命名</button>
+    <button data-action="delete" class="danger">删除</button>
+  </div>
+
+  <div id="addModal" class="modal hidden">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>添加新资源</h3>
+        <button id="closeAddModal" class="modal-close">×</button>
+      </div>
+      <div class="modal-body">
         <div class="grid-2">
           <label>
             标题
@@ -127,35 +192,11 @@
             <textarea id="mediaDescriptionInput" rows="3"></textarea>
           </label>
         </div>
-        <button id="addMediaBtn">保存资源</button>
       </div>
-
-      <div class="card">
-        <h2>资源列表</h2>
-        <table class="media-table">
-          <thead>
-            <tr>
-              <th>标题</th>
-              <th>类型</th>
-              <th>文件夹</th>
-              <th>标签</th>
-              <th>位置</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="mediaTableBody"></tbody>
-        </table>
+      <div class="modal-footer">
+        <button id="addMediaBtn">保存</button>
       </div>
-    </section>
-  </main>
-
-  <div id="dropOverlay" class="drop-overlay hidden">
-    <div class="drop-overlay-inner">释放文件以导入</div>
-  </div>
-
-  <div id="folderContextMenu" class="context-menu hidden">
-    <button data-action="rename">重命名</button>
-    <button data-action="delete" class="danger">删除</button>
+    </div>
   </div>
 
   <div id="editModal" class="modal hidden">

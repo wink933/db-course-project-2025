@@ -154,6 +154,7 @@ http://localhost:4000
 ```bash
 npm install
 npm run init-db
+npm run rebuild:electron
 npm run electron:dev
 ```
 
@@ -192,3 +193,15 @@ npm run electron:dist
      PORT=4000 npm start
      ```
    - 访问 `http://localhost:4000`。
+
+3. **运行时报错 `NODE_MODULE_VERSION` 不匹配（better-sqlite3 原生模块）**
+    - 典型现象：提示类似 `was compiled against a different Node.js version`。
+    - 原因：你切换了 Node 版本，或在 Electron（自带 Node ABI）与普通 Node 环境之间来回运行，导致 `better-sqlite3` 的二进制产物不兼容。
+    - 解决：
+       ```bash
+       # 在普通 Node 环境下运行 server.js 时
+       npm run rebuild:node
+
+       # 在 Electron 环境下运行桌面版时
+       npm run rebuild:electron
+       ```
