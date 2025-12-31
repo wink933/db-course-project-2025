@@ -11,7 +11,13 @@ const state = {
   selectedItemId: '',
 
   sortMode: 'created_desc',
-  viewMode: 'list'
+  viewMode: 'list',
+
+  selectedItemIds: new Set(),
+  lastSelectedIndex: -1,
+
+  detailSortKey: 'title', // title | media_type | file_size | file_mtime | path | tags
+  detailSortDir: 'asc' // asc | desc
 };
 
 const elements = {
@@ -39,11 +45,25 @@ const elements = {
 
   sortBtn: document.getElementById('sortBtn'),
   viewToggleBtn: document.getElementById('viewToggleBtn'),
+  emptyTrashBtn: document.getElementById('emptyTrashBtn'),
+
+  breadcrumb: document.getElementById('breadcrumb'),
+
+  bulkBar: document.getElementById('bulkBar'),
+  bulkCount: document.getElementById('bulkCount'),
+  bulkFolderSelect: document.getElementById('bulkFolderSelect'),
+  bulkMoveBtn: document.getElementById('bulkMoveBtn'),
+  bulkTagsInput: document.getElementById('bulkTagsInput'),
+  bulkTagBtn: document.getElementById('bulkTagBtn'),
+  bulkUntagBtn: document.getElementById('bulkUntagBtn'),
+  bulkRestoreBtn: document.getElementById('bulkRestoreBtn'),
+  bulkDeleteBtn: document.getElementById('bulkDeleteBtn'),
 
   inspectorEmpty: document.getElementById('inspectorEmpty'),
   inspector: document.getElementById('inspector'),
   previewBox: document.getElementById('previewBox'),
   detailTitle: document.getElementById('detailTitle'),
+  restoreBtn: document.getElementById('restoreBtn'),
   detailLocations: document.getElementById('detailLocations'),
   detailTags: document.getElementById('detailTags'),
   tagPicker: document.getElementById('tagPicker'),
@@ -63,6 +83,7 @@ const elements = {
   mediaTagsInput: document.getElementById('mediaTagsInput'),
   storageTypeInput: document.getElementById('storageTypeInput'),
   mediaPathInput: document.getElementById('mediaPathInput'),
+  mediaUploadInput: document.getElementById('mediaUploadInput'),
   mediaDeviceInput: document.getElementById('mediaDeviceInput'),
   mediaAccessInput: document.getElementById('mediaAccessInput'),
   mediaDescriptionInput: document.getElementById('mediaDescriptionInput'),
@@ -82,7 +103,8 @@ const elements = {
   saveEditBtn: document.getElementById('saveEditBtn'),
 
   dropOverlay: document.getElementById('dropOverlay'),
-  folderContextMenu: document.getElementById('folderContextMenu')
+  folderContextMenu: document.getElementById('folderContextMenu'),
+  mediaContextMenu: document.getElementById('mediaContextMenu')
 };
 
 let editingId = null;
@@ -99,6 +121,11 @@ const searchState = {
 };
 
 let folderById = new Map();
+
+let mediaContextTargetId = null;
+let mediaContextLocationId = null;
+
+let draggingMediaItemIds = null;
 
 const FOLDER_COLLAPSED_KEY = 'folderCollapsedIds.v1';
 let collapsedFolderIds = loadCollapsedFolderIds();
@@ -174,12 +201,208 @@ function sortModeLabel(mode) {
 }
 
 function viewModeLabel(mode) {
-  return mode === 'grid' ? '网格' : '列表';
+  if (mode === 'grid') return '网格';
+  if (mode === 'details') return '详细';
+  return '列表';
 }
 
 function updateToolbarControls() {
   if (elements.sortBtn) elements.sortBtn.textContent = `排序：${sortModeLabel(state.sortMode)}`;
   if (elements.viewToggleBtn) elements.viewToggleBtn.textContent = `视图：${viewModeLabel(state.viewMode)}`;
+  if (elements.emptyTrashBtn) {
+    elements.emptyTrashBtn.classList.toggle('hidden', state.library !== 'trash');
+  }
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n < 0) return '-';
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n;
+  let idx = -1;
+  while (v >= 1024 && idx < units.length - 1) {
+    v /= 1024;
+    idx += 1;
+  }
+  return `${v.toFixed(v >= 10 ? 1 : 2)} ${units[idx]}`;
+}
+
+function formatDateTime(iso) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '-';
+  return d.toLocaleString();
+}
+
+function getPrimaryLocationDisplay(item) {
+  const loc = pickPrimaryLocation(item);
+  if (!loc) return '';
+  return loc.path || '';
+}
+
+function getPrimaryLocationMeta(item) {
+  const loc = pickPrimaryLocation(item);
+  if (!loc) return { size: null, mtime: null, locationId: '' };
+  if (isWebLocation(loc)) {
+    return { size: null, mtime: null, locationId: loc.location_id || '' };
+  }
+  return {
+    size: loc.file_size ?? null,
+    mtime: loc.file_mtime ?? null,
+    locationId: loc.location_id || ''
+  };
+}
+
+function normalizeSortValue(v) {
+  if (v == null) return '';
+  return (v ?? '').toString();
+}
+
+function compareMaybeNumber(a, b) {
+  const na = Number(a);
+  const nb = Number(b);
+  const aNum = Number.isFinite(na);
+  const bNum = Number.isFinite(nb);
+  if (aNum && bNum) return na - nb;
+  if (aNum) return -1;
+  if (bNum) return 1;
+  return normalizeSortValue(a).localeCompare(normalizeSortValue(b), 'zh-Hans-CN');
+}
+
+function getDisplayedItems() {
+  const items = filterByLibrary(state.media).slice();
+
+  if (state.viewMode === 'details') {
+    const dir = state.detailSortDir === 'desc' ? -1 : 1;
+    const key = state.detailSortKey;
+    items.sort((a, b) => {
+      if (key === 'title') {
+        return dir * (a.title || '').localeCompare(b.title || '', 'zh-Hans-CN');
+      }
+      if (key === 'media_type') {
+        return dir * (a.media_type || '').localeCompare(b.media_type || '', 'zh-Hans-CN');
+      }
+      if (key === 'file_size') {
+        return dir * compareMaybeNumber(getPrimaryLocationMeta(a).size, getPrimaryLocationMeta(b).size);
+      }
+      if (key === 'file_mtime') {
+        const at = new Date(getPrimaryLocationMeta(a).mtime || 0).getTime();
+        const bt = new Date(getPrimaryLocationMeta(b).mtime || 0).getTime();
+        return dir * (at - bt);
+      }
+      if (key === 'path') {
+        return dir * (getPrimaryLocationDisplay(a) || '').localeCompare(getPrimaryLocationDisplay(b) || '', 'zh-Hans-CN');
+      }
+      if (key === 'tags') {
+        const at = (a.tags || []).map((t) => t.tag_name).join(',');
+        const bt = (b.tags || []).map((t) => t.tag_name).join(',');
+        return dir * at.localeCompare(bt, 'zh-Hans-CN');
+      }
+      return 0;
+    });
+    return items;
+  }
+
+  if (state.sortMode === 'created_asc') {
+    items.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+  } else if (state.sortMode === 'title_asc') {
+    items.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh-Hans-CN'));
+  } else {
+    items.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+  }
+  return items;
+}
+
+function setSelection(nextIds, primaryId, lastIndex) {
+  state.selectedItemIds = new Set((nextIds || []).filter(Boolean));
+  state.selectedItemId = primaryId || (Array.from(state.selectedItemIds)[0] || '');
+  state.lastSelectedIndex = Number.isFinite(lastIndex) ? lastIndex : state.lastSelectedIndex;
+  renderMediaList();
+  renderInspector();
+  renderBulkBar();
+}
+
+function clearSelection() {
+  setSelection([], '', -1);
+}
+
+function renderBulkBar() {
+  const count = state.selectedItemIds.size;
+  if (!elements.bulkBar) return;
+  elements.bulkBar.classList.toggle('hidden', count < 2);
+  if (elements.bulkCount) {
+    elements.bulkCount.textContent = count >= 2 ? `已选 ${count} 项` : '';
+  }
+  if (elements.bulkRestoreBtn) {
+    elements.bulkRestoreBtn.classList.toggle('hidden', state.library !== 'trash');
+  }
+  if (elements.bulkDeleteBtn) {
+    elements.bulkDeleteBtn.textContent = state.library === 'trash' ? '永久删除' : '删除';
+  }
+}
+
+function buildFolderBreadcrumb(folderId) {
+  const chain = [];
+  let current = folderId ? folderById.get(folderId) : null;
+  while (current) {
+    chain.push(current);
+    const pid = current.parent_id || '';
+    current = pid ? folderById.get(pid) : null;
+  }
+  chain.reverse();
+  return chain;
+}
+
+function renderBreadcrumb() {
+  if (!elements.breadcrumb) return;
+  elements.breadcrumb.innerHTML = '';
+
+  const addSep = () => {
+    const sep = document.createElement('span');
+    sep.className = 'sep';
+    sep.textContent = '›';
+    elements.breadcrumb.appendChild(sep);
+  };
+
+  if (state.library === 'trash') {
+    const root = document.createElement('span');
+    root.className = 'crumb';
+    root.textContent = '回收站';
+    root.style.cursor = 'default';
+    elements.breadcrumb.appendChild(root);
+    return;
+  }
+
+  const root = document.createElement('button');
+  root.type = 'button';
+  root.className = 'crumb';
+  root.textContent = '全部文件';
+  root.addEventListener('click', async () => {
+    state.folderId = '';
+    searchState.scope = 'all';
+    updateScopeUI();
+    renderFolders();
+    await fetchMedia();
+  });
+  elements.breadcrumb.appendChild(root);
+
+  const chain = buildFolderBreadcrumb(state.folderId);
+  chain.forEach((f) => {
+    addSep();
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'crumb';
+    btn.textContent = f.folder_name || '';
+    btn.addEventListener('click', async () => {
+      state.folderId = f.folder_id;
+      searchState.scope = 'currentFolder';
+      updateScopeUI();
+      renderFolders();
+      await fetchMedia();
+    });
+    elements.breadcrumb.appendChild(btn);
+  });
 }
 
 function parseSearchInput(raw) {
@@ -211,6 +434,28 @@ function escapeHtml(s) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
+}
+
+function isLikelyMobileClient() {
+  const ua = (navigator.userAgent || '').toLowerCase();
+  if (ua.includes('iphone') || ua.includes('ipod') || ua.includes('ipad')) return true;
+  if (ua.includes('android')) return true;
+  // iPadOS 有时伪装成 Macintosh
+  if (ua.includes('macintosh') && (navigator.maxTouchPoints || 0) > 1) return true;
+  return false;
+}
+
+function isLocalhostHost() {
+  const host = (location.hostname || '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
+function shouldDownloadForLocalOpen() {
+  // 非 localhost（例如通过局域网 IP 访问）时，“打开”会发生在服务器（电脑）上，
+  // 对移动端/其他电脑而言应改为下载到当前设备。
+  if (!isLocalhostHost()) return true;
+  if (isLikelyMobileClient()) return true;
+  return false;
 }
 
 function parseChipTokens(raw) {
@@ -428,13 +673,51 @@ function getDeviceName(deviceId) {
 }
 
 function renderFolderOptions() {
-  const options = ['<option value="">未分类</option>'];
-  state.folders.forEach((folder) => {
-    options.push(`<option value="${folder.folder_id}">${folder.folder_name}</option>`);
-  });
-  elements.folderParentSelect.innerHTML = '<option value="">根目录</option>' + options.slice(1).join('');
-  elements.mediaFolderInput.innerHTML = options.join('');
-  elements.editMediaFolderInput.innerHTML = options.join('');
+  const byParent = new Map();
+  for (const folder of state.folders || []) {
+    const parentId = folder.parent_id || null;
+    if (!byParent.has(parentId)) byParent.set(parentId, []);
+    byParent.get(parentId).push(folder);
+  }
+
+  const sortSiblings = (a, b) => {
+    const ao = Number.isFinite(a?.sort_order) ? a.sort_order : 0;
+    const bo = Number.isFinite(b?.sort_order) ? b.sort_order : 0;
+    if (ao !== bo) return ao - bo;
+    return (a.folder_name || '').localeCompare(b.folder_name || '', 'zh-Hans-CN');
+  };
+
+  for (const list of byParent.values()) {
+    list.sort(sortSiblings);
+  }
+
+  const optionRows = [];
+  const walk = (parentId, depth) => {
+    const children = byParent.get(parentId) || [];
+    for (const child of children) {
+      const indent = '\u00A0\u00A0'.repeat(depth) + (depth ? '↳ ' : '');
+      optionRows.push({
+        id: child.folder_id,
+        label: `${indent}${escapeHtml(child.folder_name || '')}`
+      });
+      walk(child.folder_id, depth + 1);
+    }
+  };
+  walk(null, 0);
+
+  const mediaOptions = ['<option value="">未分类</option>'];
+  optionRows.forEach((o) => mediaOptions.push(`<option value="${o.id}">${o.label}</option>`));
+
+  const parentOptions = ['<option value="">根目录</option>'];
+  optionRows.forEach((o) => parentOptions.push(`<option value="${o.id}">${o.label}</option>`));
+
+  elements.folderParentSelect.innerHTML = parentOptions.join('');
+  elements.mediaFolderInput.innerHTML = mediaOptions.join('');
+  elements.editMediaFolderInput.innerHTML = mediaOptions.join('');
+
+  if (elements.bulkFolderSelect) {
+    elements.bulkFolderSelect.innerHTML = mediaOptions.join('');
+  }
 }
 
 function renderDeviceOptions() {
@@ -640,8 +923,27 @@ function renderDevices() {
     }
     const lastSync = device.last_sync_time ? new Date(device.last_sync_time) : null;
     const isRecent = lastSync && (nowMs() - lastSync.getTime() < 5 * 60 * 1000);
-    const statusDot = `<span class="status-dot ${isRecent ? 'online' : 'offline'}"></span>`;
-    li.innerHTML = `${statusDot}<span class="device-name">${device.device_name}</span> <span class="device-type">(${device.device_type || '未知'})</span>`;
+    const statusDot = document.createElement('span');
+    statusDot.className = `status-dot ${isRecent ? 'online' : 'offline'}`;
+
+    const name = document.createElement('span');
+    name.className = 'device-name';
+    name.textContent = device.device_name;
+
+    const type = document.createElement('span');
+    type.className = 'device-type';
+    type.textContent = `(${device.device_type || '未知'})`;
+
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'device-delete';
+    del.title = '删除设备';
+    del.textContent = '删除';
+
+    li.appendChild(statusDot);
+    li.appendChild(name);
+    li.appendChild(type);
+    li.appendChild(del);
     elements.deviceList.appendChild(li);
   });
 }
@@ -669,24 +971,19 @@ function filterByLibrary(items) {
       return !Number.isNaN(t) && t >= cutoff;
     });
   }
+  if (state.library === 'trash') {
+    return items;
+  }
   return items;
 }
 
 function renderMediaList() {
   elements.mediaList.innerHTML = '';
-  const items = filterByLibrary(state.media).slice();
+  const items = getDisplayedItems();
 
   // view mode
   elements.mediaList.classList.toggle('grid', state.viewMode === 'grid');
-
-  // sort
-  if (state.sortMode === 'created_asc') {
-    items.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
-  } else if (state.sortMode === 'title_asc') {
-    items.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh-Hans-CN'));
-  } else {
-    items.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
-  }
+  elements.mediaList.classList.toggle('details', state.viewMode === 'details');
 
   if (!items.length) {
     const empty = document.createElement('li');
@@ -697,12 +994,45 @@ function renderMediaList() {
     return;
   }
 
-  for (const item of items) {
+  if (state.viewMode === 'details') {
+    const header = document.createElement('li');
+    header.className = 'resource-header';
+
+    const mkBtn = (key, label) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.sort = key;
+      const active = state.detailSortKey === key;
+      btn.classList.toggle('active', active);
+      const arrow = active ? (state.detailSortDir === 'asc' ? ' ▲' : ' ▼') : '';
+      btn.textContent = `${label}${arrow}`;
+      return btn;
+    };
+
+    const inner = document.createElement('div');
+    inner.className = 'resource-header-inner';
+    inner.innerHTML = '<div></div>';
+    inner.appendChild(mkBtn('title', '名称'));
+    inner.appendChild(mkBtn('media_type', '类型'));
+    inner.appendChild(mkBtn('file_size', '大小'));
+    inner.appendChild(mkBtn('file_mtime', '修改时间'));
+    inner.appendChild(mkBtn('path', '位置'));
+    inner.appendChild(mkBtn('tags', '标签'));
+    header.appendChild(inner);
+    elements.mediaList.appendChild(header);
+  }
+
+  items.forEach((item, index) => {
     const li = document.createElement('li');
     li.className = 'resource-item';
     li.dataset.id = item.item_id;
+    li.dataset.index = String(index);
+    li.draggable = true;
     if (item.item_id === state.selectedItemId) {
       li.classList.add('selected');
+    }
+    if (state.selectedItemIds.has(item.item_id)) {
+      li.classList.add('multi-selected');
     }
     const icon = typeIcon(item.media_type);
     const primaryLoc = pickPrimaryLocation(item);
@@ -710,21 +1040,41 @@ function renderMediaList() {
       ? (isWebLocation(primaryLoc) ? 'Web' : `本地: ${primaryLoc.path}`)
       : '';
     const tagPills = (item.tags || []).slice(0, 2).map((t) => `<span class="tag-pill">${t.tag_name}</span>`).join('');
-    li.innerHTML = `
-      <div class="item-icon">${icon}</div>
-      <div class="item-info">
-        <div class="item-title">${item.title || ''}</div>
-        <div class="item-meta">
-          <span>${item.media_type || ''}</span>
-          <span>•</span>
-          <span>${formatDate(item.created_at)}</span>
-          ${tagPills ? `<span style="margin-left: 6px; display: inline-flex; gap: 6px;">${tagPills}</span>` : ''}
+
+    if (state.viewMode === 'details') {
+      const meta = getPrimaryLocationMeta(item);
+      const sizeText = meta.size != null ? formatBytes(meta.size) : '-';
+      const mtimeText = meta.mtime ? formatDateTime(meta.mtime) : '-';
+      const pathText = getPrimaryLocationDisplay(item);
+      const tagsText = (item.tags || []).map((t) => t.tag_name).join(', ');
+      li.innerHTML = `
+        <div class="resource-row">
+          <div class="resource-check"><input data-role="select" type="checkbox" ${state.selectedItemIds.has(item.item_id) ? 'checked' : ''} /></div>
+          <div class="resource-cell">${escapeHtml(item.title || '')}</div>
+          <div class="resource-cell muted">${escapeHtml(item.media_type || '')}</div>
+          <div class="resource-cell muted">${escapeHtml(sizeText)}</div>
+          <div class="resource-cell muted">${escapeHtml(mtimeText)}</div>
+          <div class="resource-cell muted">${escapeHtml(pathText || '')}</div>
+          <div class="resource-cell muted">${escapeHtml(tagsText || '')}</div>
         </div>
-      </div>
-      <div class="item-loc">${locText}</div>
-    `;
+      `;
+    } else {
+      li.innerHTML = `
+        <div class="item-icon">${icon}</div>
+        <div class="item-info">
+          <div class="item-title">${item.title || ''}</div>
+          <div class="item-meta">
+            <span>${item.media_type || ''}</span>
+            <span>•</span>
+            <span>${formatDate(item.created_at)}</span>
+            ${tagPills ? `<span style="margin-left: 6px; display: inline-flex; gap: 6px;">${tagPills}</span>` : ''}
+          </div>
+        </div>
+        <div class="item-loc">${locText}</div>
+      `;
+    }
     elements.mediaList.appendChild(li);
-  }
+  });
 }
 
 function getSelectedItem() {
@@ -744,13 +1094,33 @@ function renderInspector() {
     elements.openPrimaryBtn.disabled = true;
     elements.shareBtn.disabled = true;
     elements.deleteBtn.disabled = true;
+    if (elements.restoreBtn) elements.restoreBtn.classList.add('hidden');
     return;
   }
 
   setInspectorVisible(true);
 
+  const isTrashItem = state.library === 'trash' || !!item.deleted_at;
+  if (elements.restoreBtn) {
+    elements.restoreBtn.classList.toggle('hidden', !isTrashItem);
+  }
+  if (elements.deleteBtn) {
+    elements.deleteBtn.textContent = isTrashItem ? '永久删除' : '删除';
+  }
+
   const loc = pickPrimaryLocation(item);
   const mediaType = (item.media_type || '').toLowerCase();
+
+  if (loc) {
+    if (isWebLocation(loc)) {
+      elements.openPrimaryBtn.textContent = '打开';
+    } else {
+      elements.openPrimaryBtn.textContent = shouldDownloadForLocalOpen() ? '下载' : '打开';
+    }
+  } else {
+    elements.openPrimaryBtn.textContent = '打开';
+  }
+
   if (!loc) {
     elements.previewBox.innerHTML = `<div class="preview-empty">${typeIcon(item.media_type)} 预览</div>`;
   } else if (isWebLocation(loc)) {
@@ -766,7 +1136,7 @@ function renderInspector() {
     const filePath = loc.path || '';
     const ext = (filePath.split('.').pop() || '').toLowerCase();
     const src = `/api/media/${encodeURIComponent(item.item_id)}/preview?locationId=${encodeURIComponent(loc.location_id)}`;
-    const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'].includes(ext);
+    const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'heif'].includes(ext);
     const isVideo = ['mp4', 'webm', 'mov', 'm4v', 'mkv'].includes(ext);
     const isPdf = ext === 'pdf';
 
@@ -781,11 +1151,12 @@ function renderInspector() {
     } else if (isPdf) {
       elements.previewBox.innerHTML = `<iframe class="preview-iframe" src="${src}" title="pdf"></iframe>`;
     } else {
+      const actionLabel = shouldDownloadForLocalOpen() ? '下载' : '打开';
       elements.previewBox.innerHTML = `
         <div class="preview-empty">
           ${typeIcon(item.media_type)}
           <div style="margin-top:8px; font-weight:600;">无法预览该格式</div>
-          <div style="margin-top:6px; color: var(--muted); font-size: 12px;">可点击“打开”查看原文件</div>
+          <div style="margin-top:6px; color: var(--muted); font-size: 12px;">可点击“${actionLabel}”查看原文件</div>
         </div>
       `;
     }
@@ -853,9 +1224,12 @@ function renderInspector() {
 }
 
 function selectItem(itemId) {
-  state.selectedItemId = itemId || '';
-  renderMediaList();
-  renderInspector();
+  const id = itemId || '';
+  if (!id) {
+    clearSelection();
+    return;
+  }
+  setSelection([id], id, state.lastSelectedIndex);
 }
 
 async function setItemTags(itemId, tags) {
@@ -970,6 +1344,10 @@ async function fetchBootstrap() {
 async function fetchMedia() {
   const params = new URLSearchParams();
 
+  if (state.library === 'trash') {
+    params.set('trash', '1');
+  }
+
   // Convert any typed tokens into chips before querying
   convertInputTokensToChips();
 
@@ -997,14 +1375,24 @@ async function fetchMedia() {
   state.media = applyScopeAndChips(serverItems);
 
   const visibleItems = filterByLibrary(state.media);
-  if (state.selectedItemId && !visibleItems.some((m) => m.item_id === state.selectedItemId)) {
-    state.selectedItemId = '';
+
+  // Keep multi-select consistent with what is currently visible.
+  const visibleIdSet = new Set(visibleItems.map((m) => m.item_id));
+  const nextSelected = Array.from(state.selectedItemIds).filter((id) => visibleIdSet.has(id));
+  const primaryOk = state.selectedItemId && visibleIdSet.has(state.selectedItemId);
+
+  if (!primaryOk) {
+    const fallbackPrimary = nextSelected[0] || (visibleItems[0]?.item_id || '');
+    setSelection(nextSelected.length ? nextSelected : (fallbackPrimary ? [fallbackPrimary] : []), fallbackPrimary, state.lastSelectedIndex);
+  } else {
+    // Ensure primary is included.
+    const ensured = new Set(nextSelected);
+    if (state.selectedItemId) ensured.add(state.selectedItemId);
+    setSelection(Array.from(ensured), state.selectedItemId, state.lastSelectedIndex);
   }
-  if (!state.selectedItemId && visibleItems.length) {
-    state.selectedItemId = visibleItems[0].item_id;
-  }
-  renderMediaList();
-  renderInspector();
+
+  renderBreadcrumb();
+  updateToolbarControls();
 }
 
 async function addFolder() {
@@ -1033,7 +1421,15 @@ async function addDevice() {
 }
 
 async function addMedia() {
-  const title = elements.mediaTitleInput.value.trim();
+  const selectedFile = elements.mediaUploadInput?.files?.[0] || null;
+  if (selectedFile && elements.storageTypeInput.value !== 'Local') {
+    alert('已选择文件时，“资源类型”必须是本地文件（Local）。');
+    return;
+  }
+  let title = elements.mediaTitleInput.value.trim();
+  if (!title && selectedFile) {
+    title = (selectedFile.name || '').replace(/\.[^./\\]+$/, '').trim();
+  }
   if (!title) return;
 
   const tagNames = elements.mediaTagsInput.value
@@ -1041,25 +1437,46 @@ async function addMedia() {
     .map((tag) => tag.trim())
     .filter(Boolean);
 
-  await fetch('/api/media', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      title,
-      mediaType: elements.mediaTypeInput.value,
-      description: elements.mediaDescriptionInput.value.trim(),
-      folderId: elements.mediaFolderInput.value,
-      tags: tagNames,
-      storageType: elements.storageTypeInput.value,
-      path: elements.mediaPathInput.value.trim(),
-      accessInfo: elements.mediaAccessInput.value.trim(),
-      deviceId: elements.mediaDeviceInput.value
-    })
-  });
+  if (selectedFile && elements.storageTypeInput.value === 'Local') {
+    const fd = new FormData();
+    fd.append('file', selectedFile);
+    fd.append('title', title);
+    fd.append('mediaType', elements.mediaTypeInput.value);
+    fd.append('description', elements.mediaDescriptionInput.value.trim());
+    fd.append('folderId', elements.mediaFolderInput.value);
+    fd.append('tags', JSON.stringify(tagNames));
+
+    const res = await fetch('/api/media/upload', { method: 'POST', body: fd });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(data?.error || '上传失败');
+      return;
+    }
+    if (data?.item_id) {
+      state.selectedItemId = data.item_id;
+    }
+  } else {
+    await fetch('/api/media', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title,
+        mediaType: elements.mediaTypeInput.value,
+        description: elements.mediaDescriptionInput.value.trim(),
+        folderId: elements.mediaFolderInput.value,
+        tags: tagNames,
+        storageType: elements.storageTypeInput.value,
+        path: elements.mediaPathInput.value.trim(),
+        accessInfo: elements.mediaAccessInput.value.trim(),
+        deviceId: elements.mediaDeviceInput.value
+      })
+    });
+  }
 
   elements.mediaTitleInput.value = '';
   elements.mediaTagsInput.value = '';
   elements.mediaPathInput.value = '';
+  if (elements.mediaUploadInput) elements.mediaUploadInput.value = '';
   elements.mediaAccessInput.value = '';
   elements.mediaDescriptionInput.value = '';
 
@@ -1111,7 +1528,9 @@ function bindEvents() {
 
     if (elements.viewToggleBtn) {
       elements.viewToggleBtn.addEventListener('click', () => {
-        state.viewMode = state.viewMode === 'list' ? 'grid' : 'list';
+        state.viewMode = state.viewMode === 'list'
+          ? 'grid'
+          : (state.viewMode === 'grid' ? 'details' : 'list');
         updateToolbarControls();
         renderMediaList();
       });
@@ -1144,6 +1563,7 @@ function bindEvents() {
     if (!btn) return;
     state.library = btn.dataset.library || 'all';
     renderLibraryNav();
+    clearSelection();
     await fetchMedia();
   });
 
@@ -1167,6 +1587,102 @@ function bindEvents() {
     await fetchMedia();
   });
 
+  // Bulk bar actions
+  if (elements.bulkMoveBtn) {
+    elements.bulkMoveBtn.addEventListener('click', async () => {
+      const folderId = elements.bulkFolderSelect?.value || '';
+      if (!folderId) {
+        alert('请选择目标文件夹');
+        return;
+      }
+      const itemIds = Array.from(state.selectedItemIds);
+      if (itemIds.length < 2) return;
+      await fetch('/api/media/batch/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds, folderId })
+      });
+      await fetchMedia();
+    });
+  }
+
+  if (elements.bulkTagBtn) {
+    elements.bulkTagBtn.addEventListener('click', async () => {
+      const raw = elements.bulkTagsInput?.value || '';
+      const tags = raw.split(',').map((t) => t.trim()).filter(Boolean);
+      if (!tags.length) {
+        alert('请输入标签（逗号分隔）');
+        return;
+      }
+      const itemIds = Array.from(state.selectedItemIds);
+      if (itemIds.length < 2) return;
+      await fetch('/api/media/batch/tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds, tags })
+      });
+      await fetchMedia();
+    });
+  }
+
+  if (elements.bulkUntagBtn) {
+    elements.bulkUntagBtn.addEventListener('click', async () => {
+      const raw = elements.bulkTagsInput?.value || '';
+      const tags = raw.split(',').map((t) => t.trim()).filter(Boolean);
+      if (!tags.length) {
+        alert('请输入要移除的标签（逗号分隔）');
+        return;
+      }
+      const itemIds = Array.from(state.selectedItemIds);
+      if (itemIds.length < 2) return;
+      await fetch('/api/media/batch/untag', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds, tags })
+      });
+      await fetchMedia();
+    });
+  }
+
+  if (elements.bulkRestoreBtn) {
+    elements.bulkRestoreBtn.addEventListener('click', async () => {
+      const itemIds = Array.from(state.selectedItemIds);
+      if (itemIds.length < 2) return;
+      await fetch('/api/media/batch/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds })
+      });
+      clearSelection();
+      await fetchMedia();
+    });
+  }
+
+  if (elements.bulkDeleteBtn) {
+    elements.bulkDeleteBtn.addEventListener('click', async () => {
+      const itemIds = Array.from(state.selectedItemIds);
+      if (itemIds.length < 2) return;
+      const isTrash = state.library === 'trash';
+      const ok = confirm(isTrash ? `永久删除 ${itemIds.length} 项？该操作不可恢复。` : `删除 ${itemIds.length} 项？（将移入回收站）`);
+      if (!ok) return;
+
+      if (isTrash) {
+        for (const id of itemIds) {
+          await fetch(`/api/media/${encodeURIComponent(id)}?force=1`, { method: 'DELETE' });
+        }
+      } else {
+        await fetch('/api/media/batch/trash', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ itemIds })
+        });
+      }
+      clearSelection();
+      await fetchBootstrap();
+      await fetchMedia();
+    });
+  }
+
   elements.folderList.addEventListener('dragstart', (e) => {
     const li = e.target.closest('li[data-id]');
     if (!li) return;
@@ -1187,11 +1703,22 @@ function bindEvents() {
   };
 
   elements.folderList.addEventListener('dragover', (e) => {
-    if (!draggingFolderId) return;
+    if (!draggingFolderId && !draggingMediaItemIds) return;
     const li = e.target.closest('li[data-id]');
     if (!li) return;
     const targetId = li.dataset.id;
-    if (!targetId || targetId === draggingFolderId) return;
+    if (!targetId) return;
+
+    // Drag media onto folder: always allow (except trash mode).
+    if (draggingMediaItemIds && !draggingFolderId) {
+      if (state.library === 'trash') return;
+      e.preventDefault();
+      clearDragOver();
+      li.classList.add('drag-over');
+      return;
+    }
+
+    if (!draggingFolderId || targetId === draggingFolderId) return;
 
     const targetFolder = folderById.get(targetId);
     const targetParentId = targetFolder?.parent_id || null;
@@ -1209,11 +1736,29 @@ function bindEvents() {
   });
 
   elements.folderList.addEventListener('drop', async (e) => {
-    if (!draggingFolderId) return;
+    if (!draggingFolderId && !draggingMediaItemIds) return;
     const li = e.target.closest('li[data-id]');
     if (!li) return;
     const targetId = li.dataset.id;
-    if (!targetId || targetId === draggingFolderId) return;
+    if (!targetId) return;
+
+    // Drop media onto folder to move.
+    if (draggingMediaItemIds && !draggingFolderId) {
+      if (state.library === 'trash') return;
+      e.preventDefault();
+      clearDragOver();
+      const itemIds = draggingMediaItemIds.slice();
+      draggingMediaItemIds = null;
+      await fetch('/api/media/batch/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemIds, folderId: targetId })
+      });
+      await fetchMedia();
+      return;
+    }
+
+    if (!draggingFolderId || targetId === draggingFolderId) return;
 
     const targetFolder = folderById.get(targetId);
     const targetParentId = targetFolder?.parent_id || null;
@@ -1264,10 +1809,44 @@ function bindEvents() {
   elements.folderList.addEventListener('dragend', () => {
     draggingFolderId = null;
     draggingParentId = null;
+    draggingMediaItemIds = null;
     clearDragOver();
   });
 
   elements.deviceList.addEventListener('click', async (e) => {
+    const delBtn = e.target.closest('button.device-delete');
+    if (delBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const li = delBtn.closest('li[data-id]');
+      const deviceId = li?.dataset?.id || '';
+      if (!deviceId) return;
+
+      if (!confirm('确定删除该设备？（如果该设备仍被资源引用，将无法删除）')) {
+        return;
+      }
+
+      const res = await fetch(`/api/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
+      const msg = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(msg?.error || '删除失败');
+        return;
+      }
+
+      if (state.deviceId === deviceId) {
+        state.deviceId = '';
+      }
+      if (searchState.scope === 'device' && searchState.scopeDeviceId === deviceId) {
+        searchState.scope = 'all';
+        searchState.scopeDeviceId = '';
+        updateScopeUI();
+      }
+
+      await fetchBootstrap();
+      await fetchMedia();
+      return;
+    }
+
     const target = e.target.closest('li[data-id]');
     if (!target) return;
     state.deviceId = target.dataset.id;
@@ -1313,9 +1892,111 @@ function bindEvents() {
   });
 
   elements.mediaList.addEventListener('click', (e) => {
+    const sortBtn = e.target.closest('button[data-sort]');
+    if (sortBtn) {
+      const key = sortBtn.dataset.sort || 'title';
+      if (state.detailSortKey === key) {
+        state.detailSortDir = state.detailSortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        state.detailSortKey = key;
+        state.detailSortDir = 'asc';
+      }
+      renderMediaList();
+      return;
+    }
+
+    const checkbox = e.target.closest('input[data-role="select"]');
     const li = e.target.closest('li[data-id]');
     if (!li) return;
-    selectItem(li.dataset.id);
+    const itemId = li.dataset.id;
+    const index = Number(li.dataset.index);
+    if (!itemId || !Number.isFinite(index)) return;
+
+    const ctrl = e.ctrlKey || e.metaKey;
+    const shift = e.shiftKey;
+
+    const displayed = getDisplayedItems();
+    const rangeSelect = (from, to) => {
+      const a = Math.max(0, Math.min(from, to));
+      const b = Math.min(displayed.length - 1, Math.max(from, to));
+      const ids = [];
+      for (let i = a; i <= b; i += 1) ids.push(displayed[i].item_id);
+      return ids;
+    };
+
+    // If user clicks checkbox, treat as toggle.
+    if (checkbox) {
+      e.preventDefault();
+      e.stopPropagation();
+      const next = new Set(state.selectedItemIds);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      setSelection(Array.from(next), itemId, index);
+      return;
+    }
+
+    if (shift && state.lastSelectedIndex >= 0) {
+      const ids = rangeSelect(state.lastSelectedIndex, index);
+      const next = ctrl ? new Set(state.selectedItemIds) : new Set();
+      ids.forEach((id) => next.add(id));
+      setSelection(Array.from(next), itemId, index);
+      return;
+    }
+
+    if (ctrl) {
+      const next = new Set(state.selectedItemIds);
+      if (next.has(itemId)) next.delete(itemId);
+      else next.add(itemId);
+      setSelection(Array.from(next), itemId, index);
+      return;
+    }
+
+    setSelection([itemId], itemId, index);
+  });
+
+  elements.mediaList.addEventListener('contextmenu', (e) => {
+    const li = e.target.closest('li[data-id]');
+    if (!li) return;
+    const itemId = li.dataset.id;
+    if (!itemId) return;
+    e.preventDefault();
+
+    // If right-clicked item isn't in selection, select it.
+    if (!state.selectedItemIds.has(itemId)) {
+      const index = Number(li.dataset.index);
+      setSelection([itemId], itemId, Number.isFinite(index) ? index : state.lastSelectedIndex);
+    }
+
+    mediaContextTargetId = itemId;
+    const item = getItemById(itemId);
+    const loc = pickPrimaryLocation(item);
+    mediaContextLocationId = loc?.location_id || null;
+    showMediaContextMenu(e.clientX, e.clientY);
+  });
+
+  elements.mediaList.addEventListener('dragstart', (e) => {
+    const li = e.target.closest('li[data-id]');
+    if (!li) return;
+    const itemId = li.dataset.id;
+    if (!itemId) return;
+
+    // Ensure dragged item is selected.
+    if (!state.selectedItemIds.has(itemId)) {
+      const index = Number(li.dataset.index);
+      setSelection([itemId], itemId, Number.isFinite(index) ? index : state.lastSelectedIndex);
+    }
+
+    draggingMediaItemIds = Array.from(state.selectedItemIds);
+    e.dataTransfer.effectAllowed = 'move';
+    try {
+      e.dataTransfer.setData('application/x-mediarchive-itemids', JSON.stringify(draggingMediaItemIds));
+    } catch {
+      // ignore
+    }
+  });
+
+  elements.mediaList.addEventListener('dragend', () => {
+    draggingMediaItemIds = null;
   });
 
   elements.openPrimaryBtn.addEventListener('click', async () => {
@@ -1327,6 +2008,13 @@ function bindEvents() {
       window.open(loc.path, '_blank', 'noopener,noreferrer');
       return;
     }
+
+     // 移动端/非 localhost：下载到当前设备，而不是让电脑打开默认应用。
+     if (shouldDownloadForLocalOpen()) {
+       const downloadUrl = `/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
+       window.open(downloadUrl, '_blank');
+       return;
+     }
 
     try {
       const openUrl = `/api/media/${encodeURIComponent(item.item_id)}/open?locationId=${encodeURIComponent(loc.location_id)}`;
@@ -1363,13 +2051,43 @@ function bindEvents() {
   elements.deleteBtn.addEventListener('click', async () => {
     const item = getSelectedItem();
     if (!item) return;
-    const ok = confirm(`删除资源：${item.title || ''} ？`);
+    const isTrash = state.library === 'trash' || !!item.deleted_at;
+    const ok = confirm(isTrash
+      ? `永久删除资源：${item.title || ''} ？该操作不可恢复。`
+      : `删除资源：${item.title || ''} ？（将移入回收站）`
+    );
     if (!ok) return;
-    await fetch(`/api/media/${item.item_id}`, { method: 'DELETE' });
-    state.selectedItemId = '';
+    const url = isTrash
+      ? `/api/media/${encodeURIComponent(item.item_id)}?force=1`
+      : `/api/media/${encodeURIComponent(item.item_id)}`;
+    await fetch(url, { method: 'DELETE' });
+    clearSelection();
     await fetchBootstrap();
     await fetchMedia();
   });
+
+  if (elements.restoreBtn) {
+    elements.restoreBtn.addEventListener('click', async () => {
+      const item = getSelectedItem();
+      if (!item) return;
+      await fetch(`/api/media/${encodeURIComponent(item.item_id)}/restore`, { method: 'POST' });
+      clearSelection();
+      await fetchBootstrap();
+      await fetchMedia();
+    });
+  }
+
+  if (elements.emptyTrashBtn) {
+    elements.emptyTrashBtn.addEventListener('click', async () => {
+      if (state.library !== 'trash') return;
+      const ok = confirm('清空回收站？该操作不可恢复。');
+      if (!ok) return;
+      await fetch('/api/trash/empty', { method: 'POST' });
+      clearSelection();
+      await fetchBootstrap();
+      await fetchMedia();
+    });
+  }
 
   elements.tagAddInput.addEventListener('keydown', async (e) => {
     if (e.key !== 'Enter') return;
@@ -1479,6 +2197,9 @@ function bindEvents() {
     if (!elements.folderContextMenu.contains(e.target)) {
       hideFolderContextMenu();
     }
+    if (elements.mediaContextMenu && !elements.mediaContextMenu.contains(e.target)) {
+      hideMediaContextMenu();
+    }
   });
 
   document.addEventListener('click', (e) => {
@@ -1520,10 +2241,111 @@ function bindEvents() {
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     elements.folderContextMenu.classList.add('hidden');
+    hideMediaContextMenu();
     closeAddModal();
     closeEditModal();
     cancelInlineRename();
   });
+
+  if (elements.mediaContextMenu) {
+    elements.mediaContextMenu.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button[data-action]');
+      const action = btn ? btn.dataset.action : null;
+      const targetId = mediaContextTargetId;
+      if (!action || !targetId) return;
+      const item = getItemById(targetId);
+      if (!item) return;
+
+      if (action === 'open') {
+        hideMediaContextMenu();
+        await openItemFromContext(item);
+        return;
+      }
+      if (action === 'reveal') {
+        hideMediaContextMenu();
+        const loc = getLocationForContext(item);
+        if (!loc || isWebLocation(loc)) {
+          alert('该资源没有可定位的本地文件位置');
+          return;
+        }
+        const url = `/api/media/${encodeURIComponent(item.item_id)}/reveal?locationId=${encodeURIComponent(loc.location_id)}`;
+        const res = await fetch(url, { method: 'POST' });
+        if (!res.ok) {
+          const msg = await res.json().catch(() => ({}));
+          alert(msg?.error || '定位失败');
+        }
+        return;
+      }
+      if (action === 'copyPath') {
+        hideMediaContextMenu();
+        const loc = getLocationForContext(item);
+        if (!loc) return;
+        const text = loc.path || '';
+        try {
+          await navigator.clipboard.writeText(text);
+          alert('已复制到剪贴板');
+        } catch {
+          alert('复制失败');
+        }
+        return;
+      }
+      if (action === 'copyLink') {
+        hideMediaContextMenu();
+        const loc = getLocationForContext(item);
+        if (!loc) return;
+        let text = '';
+        if (isWebLocation(loc)) {
+          text = loc.path || '';
+        } else {
+          text = `${location.origin}/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
+        }
+        try {
+          await navigator.clipboard.writeText(text);
+          alert('已复制到剪贴板');
+        } catch {
+          alert('复制失败');
+        }
+        return;
+      }
+      if (action === 'moveTo') {
+        hideMediaContextMenu();
+        if (state.library === 'trash' || item.deleted_at) {
+          alert('回收站中的资源无法移动');
+          return;
+        }
+        const name = prompt('移动到文件夹（输入文件夹名称，需唯一匹配）：');
+        if (!name) return;
+        const matches = (state.folders || []).filter((f) => (f.folder_name || '') === name.trim());
+        if (matches.length !== 1) {
+          alert('未找到唯一匹配的文件夹名称');
+          return;
+        }
+        const folderId = matches[0].folder_id;
+        const itemIds = Array.from(state.selectedItemIds.size ? state.selectedItemIds : [item.item_id]);
+        await fetch('/api/media/batch/move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ itemIds, folderId })
+        });
+        await fetchMedia();
+        return;
+      }
+      if (action === 'addTags' || action === 'removeTags') {
+        hideMediaContextMenu();
+        const raw = prompt(action === 'addTags' ? '添加标签（逗号分隔）：' : '移除标签（逗号分隔）：');
+        if (!raw) return;
+        const tags = raw.split(',').map((t) => t.trim()).filter(Boolean);
+        if (!tags.length) return;
+        const itemIds = Array.from(state.selectedItemIds.size ? state.selectedItemIds : [item.item_id]);
+        await fetch(action === 'addTags' ? '/api/media/batch/tags' : '/api/media/batch/untag', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ itemIds, tags })
+        });
+        await fetchMedia();
+      }
+    });
+  }
 }
 
 function showFolderContextMenu(x, y) {
@@ -1540,6 +2362,62 @@ function showFolderContextMenu(x, y) {
 function hideFolderContextMenu() {
   folderContextTarget = null;
   elements.folderContextMenu.classList.add('hidden');
+}
+
+function showMediaContextMenu(x, y) {
+  const menu = elements.mediaContextMenu;
+  if (!menu) return;
+  menu.classList.remove('hidden');
+  const { innerWidth, innerHeight } = window;
+  const rect = menu.getBoundingClientRect();
+  const left = Math.min(x, innerWidth - rect.width - 8);
+  const top = Math.min(y, innerHeight - rect.height - 8);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function hideMediaContextMenu() {
+  mediaContextTargetId = null;
+  mediaContextLocationId = null;
+  if (elements.mediaContextMenu) elements.mediaContextMenu.classList.add('hidden');
+}
+
+function getItemById(itemId) {
+  return state.media.find((m) => m.item_id === itemId) || null;
+}
+
+function getLocationForContext(item) {
+  if (!item) return null;
+  const loc = pickPrimaryLocation(item);
+  if (!loc) return null;
+  if (mediaContextLocationId) {
+    const found = (item.locations || []).find((l) => l.location_id === mediaContextLocationId);
+    return found || loc;
+  }
+  return loc;
+}
+
+async function openItemFromContext(item) {
+  const loc = getLocationForContext(item);
+  if (!loc) return;
+  if (isWebLocation(loc)) {
+    window.open(loc.path, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  if (shouldDownloadForLocalOpen()) {
+    const downloadUrl = `/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
+    window.open(downloadUrl, '_blank');
+    return;
+  }
+  try {
+    const openUrl = `/api/media/${encodeURIComponent(item.item_id)}/open?locationId=${encodeURIComponent(loc.location_id)}`;
+    const res = await fetch(openUrl, { method: 'POST' });
+    if (res.ok) return;
+  } catch {
+    // ignore
+  }
+  const downloadUrl = `/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
+  window.open(downloadUrl, '_blank');
 }
 
 async function init() {

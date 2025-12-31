@@ -24,6 +24,7 @@
           <button class="nav-item" data-library="recent">最近添加</button>
           <button class="nav-item" data-library="web">Web 资源</button>
           <button class="nav-item" data-library="local">本地文件</button>
+          <button class="nav-item" data-library="trash">回收站</button>
         </div>
       </section>
 
@@ -61,6 +62,7 @@
     <main class="main-panel">
       <div class="top-toolbar">
         <div class="toolbar-search">
+          <div id="breadcrumb" class="breadcrumb" aria-label="当前路径"></div>
           <div class="search-row">
             <select id="searchScope" class="scope-select" title="搜索范围">
               <option value="all">全部</option>
@@ -78,7 +80,23 @@
         <div class="toolbar-actions">
           <button id="sortBtn" class="secondary toolbar-btn" type="button">排序：最新</button>
           <button id="viewToggleBtn" class="secondary toolbar-btn" type="button">视图：列表</button>
+          <button id="emptyTrashBtn" class="secondary toolbar-btn hidden" type="button">清空回收站</button>
           <button id="openAddModalBtn" class="primary">+ 添加资源</button>
+        </div>
+      </div>
+
+      <div id="bulkBar" class="bulk-bar hidden" aria-label="批量操作">
+        <div class="bulk-left">
+          <span id="bulkCount" class="bulk-count"></span>
+        </div>
+        <div class="bulk-actions">
+          <select id="bulkFolderSelect" title="选择目标文件夹"></select>
+          <button id="bulkMoveBtn" class="secondary" type="button">移动到</button>
+          <input id="bulkTagsInput" type="text" placeholder="批量标签（逗号分隔）" />
+          <button id="bulkTagBtn" class="secondary" type="button">添加标签</button>
+          <button id="bulkUntagBtn" class="secondary" type="button">移除标签</button>
+          <button id="bulkRestoreBtn" class="secondary hidden" type="button">恢复</button>
+          <button id="bulkDeleteBtn" class="chip-btn danger" type="button">删除</button>
         </div>
       </div>
 
@@ -98,6 +116,7 @@
           <div class="detail-row">
             <div id="detailTitle" class="detail-title"></div>
             <button id="openEditBtn" class="chip-btn">编辑</button>
+            <button id="restoreBtn" class="chip-btn hidden" type="button">恢复</button>
             <button id="deleteBtn" class="chip-btn danger">删除</button>
           </div>
         </div>
@@ -136,6 +155,16 @@
   <div id="folderContextMenu" class="context-menu hidden">
     <button data-action="rename">重命名</button>
     <button data-action="delete" class="danger">删除</button>
+  </div>
+
+  <div id="mediaContextMenu" class="context-menu hidden">
+    <button data-action="open">打开</button>
+    <button data-action="reveal">在资源管理器中定位</button>
+    <button data-action="copyPath">复制路径</button>
+    <button data-action="copyLink">复制链接</button>
+    <button data-action="moveTo">移动到文件夹</button>
+    <button data-action="addTags">添加标签</button>
+    <button data-action="removeTags">移除标签</button>
   </div>
 
   <div id="addModal" class="modal hidden">
@@ -178,6 +207,10 @@
           <label>
             路径 / URL
             <input id="mediaPathInput" type="text" />
+          </label>
+          <label>
+            选择文件 / 拍照导入
+            <input id="mediaUploadInput" type="file" accept="image/*,video/*,application/pdf" />
           </label>
           <label>
             设备

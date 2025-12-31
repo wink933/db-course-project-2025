@@ -238,6 +238,148 @@ body {
   min-width: 0;
 }
 
+.breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 18px;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.breadcrumb .crumb {
+  background: transparent;
+  border: 1px solid var(--border-weak);
+  color: var(--text);
+  padding: 4px 8px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.breadcrumb .crumb:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.breadcrumb .sep {
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+.bulk-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-strong);
+}
+
+.bulk-bar.hidden {
+  display: none;
+}
+
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bulk-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bulk-actions select,
+.bulk-actions input {
+  height: 36px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--text);
+  padding: 0 10px;
+  box-sizing: border-box;
+}
+
+.bulk-actions input {
+  width: 220px;
+}
+
+.resource-list.details {
+  display: block;
+}
+
+.resource-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-strong);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 10px;
+}
+
+.resource-row,
+.resource-header-inner {
+  display: grid;
+  grid-template-columns: 28px 1.4fr 0.7fr 0.7fr 0.9fr 1.2fr 0.9fr;
+  gap: 10px;
+  align-items: center;
+}
+
+.resource-header button {
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.resource-header button:hover {
+  border-color: var(--border-weak);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.resource-header button.active {
+  color: var(--text);
+  border-color: rgba(99, 102, 241, 0.45);
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.resource-cell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.resource-cell.muted {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.resource-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.resource-check input {
+  width: 16px;
+  height: 16px;
+}
+
+.resource-item.multi-selected {
+  border-color: rgba(99, 102, 241, 0.55);
+  background: rgba(99, 102, 241, 0.12);
+}
+
 .toolbar-search .search-row {
   display: flex;
   align-items: center;
@@ -902,6 +1044,38 @@ body::after {
   border: 1px solid var(--border);
   background: var(--surface-strong);
   color: var(--text);
+  box-sizing: border-box;
+}
+
+.grid-2 input:not([type="file"]),
+.grid-2 select {
+  height: 38px;
+}
+
+.grid-2 input[type="file"] {
+  height: 38px;
+  padding: 6px 10px;
+  color: var(--muted);
+}
+
+.grid-2 input[type="file"]::file-selector-button {
+  height: 28px;
+  margin-right: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.grid-2 input[type="file"]::-webkit-file-upload-button {
+  height: 28px;
+  margin-right: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
 }
 
 .grid-2 .full {
@@ -952,6 +1126,20 @@ body::after {
 .device-sync {
   color: var(--muted);
   font-size: 12px;
+}
+
+.device-delete {
+  margin-left: auto;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.10);
+  color: #fecaca;
+  box-shadow: none;
+}
+
+.device-delete:hover {
+  filter: brightness(1.05);
 }
 
 .status-dot {
@@ -1199,5 +1387,41 @@ button:focus {
   }
   100% {
     transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+/* Responsive: keep center list readable on iPad/mobile */
+@media (max-width: 1100px) {
+  .side-panel {
+    width: 240px;
+  }
+
+  .inspector-panel {
+    width: 320px;
+  }
+
+  .top-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar-actions {
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 860px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .side-panel,
+  .inspector-panel {
+    width: auto;
+  }
+
+  .inspector-panel {
+    order: 3;
   }
 }
