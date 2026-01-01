@@ -82,6 +82,70 @@ body {
   gap: 8px;
 }
 
+.lan-panel {
+  margin: 0 10px;
+  padding: 10px;
+  border-radius: 14px;
+  border: 1px solid var(--border-weak);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lan-card {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border-weak);
+  background: var(--surface-strong);
+}
+
+.lan-qr {
+  width: 84px;
+  height: 84px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.95);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.lan-qr img {
+  width: 84px;
+  height: 84px;
+  object-fit: contain;
+}
+
+.lan-url-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.lan-url {
+  color: var(--text);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lan-url:hover {
+  text-decoration: underline;
+}
+
+.lan-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .side-section-grow {
   flex: 1 1 auto;
   min-height: 0;
@@ -701,14 +765,43 @@ body {
   gap: 8px;
 }
 
+.tag-option-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag-option-wrap:hover .tag-delete {
+  opacity: 1;
+}
+
+.tag-delete {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  cursor: pointer;
+  opacity: 0.35;
+}
+
+.tag-delete:hover {
+  color: var(--text);
+}
+
 .tag-option {
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border-weak);
-  background: rgba(255, 255, 255, 0.06);
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-strong);
   color: var(--text);
   box-shadow: none;
   cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .tag-option:hover {

@@ -37,6 +37,9 @@ const elements = {
   syncBtn: document.getElementById('syncBtn'),
   refreshAvailabilityBtn: document.getElementById('refreshAvailabilityBtn'),
 
+  showLanShareBtn: document.getElementById('showLanShareBtn'),
+  lanSharePanel: document.getElementById('lanSharePanel'),
+
   searchInput: document.getElementById('searchInput'),
   searchScope: document.getElementById('searchScope'),
   searchScopeDevice: document.getElementById('searchScopeDevice'),
@@ -102,9 +105,20 @@ const elements = {
   editMediaAccessInput: document.getElementById('editMediaAccessInput'),
   saveEditBtn: document.getElementById('saveEditBtn'),
 
+  transferModal: document.getElementById('transferModal'),
+  closeTransferModal: document.getElementById('closeTransferModal'),
+  transferModalDesc: document.getElementById('transferModalDesc'),
+  transferDownloadBtn: document.getElementById('transferDownloadBtn'),
+  transferStreamBtn: document.getElementById('transferStreamBtn'),
+
   dropOverlay: document.getElementById('dropOverlay'),
   folderContextMenu: document.getElementById('folderContextMenu'),
   mediaContextMenu: document.getElementById('mediaContextMenu')
+};
+
+let transferModalState = {
+  item: null,
+  loc: null
 };
 
 let editingId = null;
@@ -150,6 +164,88 @@ function saveCollapsedFolderIds() {
   } catch {}
 }
 
+function openTransferModal(item, loc) {
+  if (!elements.transferModal) return;
+  transferModalState = { item, loc };
+  elements.transferModalDesc.innerHTML = `该资源位于其他设备（例如手机）。\n\n请选择：\n- 下载到本机：把文件拉取并保存到本机 uploads\n- 流式传输：不落盘，直接从对端读取`;
+  elements.transferModal.classList.remove('hidden');
+}
+
+function closeTransferModal() {
+  if (!elements.transferModal) return;
+  elements.transferModal.classList.add('hidden');
+  transferModalState = { item: null, loc: null };
+}
+
+async function handleTransferDownload() {
+  const item = transferModalState.item;
+  const loc = transferModalState.loc;
+  if (!item || !loc) return;
+
+  try {
+    const res = await fetch('/api/transfer/pull-from-phone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locationId: loc.location_id })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(data?.error || '下载失败');
+      return;
+    }
+
+    await fetchMedia();
+    closeTransferModal();
+
+    // Optional: try to open the newly imported local copy.
+    if (data?.location_id) {
+      const openUrl = `/api/media/${encodeURIComponent(item.item_id)}/open?locationId=${encodeURIComponent(data.location_id)}`;
+      await fetch(openUrl, { method: 'POST' }).catch(() => {});
+    }
+  } catch (e) {
+    alert(`下载失败：${e?.message || e}`);
+  }
+}
+
+function handleTransferStream() {
+  const loc = transferModalState.loc;
+  if (!loc) return;
+  const url = `/api/transfer/stream-from-device?locationId=${encodeURIComponent(loc.location_id)}`;
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+async function openItemWithUx(item, loc) {
+  if (!item || !loc) return;
+  if (isWebLocation(loc)) {
+    window.open(loc.path, '_blank', 'noopener,noreferrer');
+    return;
+  }
+
+  // Android content:// on desktop: show download/stream modal.
+  if (!isWebLocation(loc) && isAndroidUriLocation(loc)) {
+    openTransferModal(item, loc);
+    return;
+  }
+
+  // 移动端/非 localhost：下载到当前设备，而不是让电脑打开默认应用。
+  if (shouldDownloadForLocalOpen()) {
+    const downloadUrl = `/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
+    window.open(downloadUrl, '_blank');
+    return;
+  }
+
+  try {
+    const openUrl = `/api/media/${encodeURIComponent(item.item_id)}/open?locationId=${encodeURIComponent(loc.location_id)}`;
+    const res = await fetch(openUrl, { method: 'POST' });
+    if (res.ok) return;
+  } catch {
+    // ignore
+  }
+
+  const downloadUrl = `/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
+  window.open(downloadUrl, '_blank');
+}
+
 function toggleFolderCollapsed(folderId) {
   if (!folderId) return;
   if (collapsedFolderIds.has(folderId)) {
@@ -172,10 +268,136 @@ function isWebLocation(loc) {
   return loc?.storage_type === 'Web' || /^https?:\/\//i.test(loc?.path || '');
 }
 
+function isAndroidUriLocation(loc) {
+  const pathText = (loc?.path || '').toString();
+  return loc?.access_info === 'android_uri' || /^content:\/\//i.test(pathText);
+}
+
+let cachedSharableOrigin = null;
+
+async function getSharableOrigin() {
+  if (cachedSharableOrigin) return cachedSharableOrigin;
+  const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if (!isLocalhost) {
+    cachedSharableOrigin = location.origin;
+    return cachedSharableOrigin;
+  }
+
+  try {
+    const res = await fetch('/api/server/lan-urls');
+    const data = await res.json().catch(() => ({}));
+    const urls = Array.isArray(data?.urls) ? data.urls.filter(Boolean) : [];
+    if (urls.length) {
+      const u = new URL(urls[0]);
+      cachedSharableOrigin = u.origin;
+      return cachedSharableOrigin;
+    }
+  } catch {
+    // ignore
+  }
+
+  cachedSharableOrigin = location.origin;
+  return cachedSharableOrigin;
+}
+
+async function fetchLanUrls() {
+  const res = await fetch('/api/server/lan-urls');
+  if (!res.ok) throw new Error(`LAN URLs 请求失败：${res.status}`);
+  const data = await res.json().catch(() => ({}));
+  const urls = Array.isArray(data?.urls) ? data.urls.filter(Boolean) : [];
+  return urls;
+}
+
+function lanQrSrc(url) {
+  const encoded = encodeURIComponent(url);
+  return `/api/server/lan-qr?url=${encoded}`;
+}
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function renderLanSharePanel(urls) {
+  if (!elements.lanSharePanel) return;
+  elements.lanSharePanel.innerHTML = '';
+
+  const note = document.createElement('div');
+  note.className = 'hint';
+  note.textContent = '用途：把下面任一地址复制到手机 App 首页的“电脑端服务器地址”。若手机连不上，请用 HOST=0.0.0.0 启动服务并检查防火墙。';
+  elements.lanSharePanel.appendChild(note);
+
+  if (!urls.length) {
+    const empty = document.createElement('div');
+    empty.className = 'hint';
+    empty.textContent = '未检测到可用的局域网地址（可能未连接 Wi‑Fi 或网卡被禁用）。';
+    elements.lanSharePanel.appendChild(empty);
+    return;
+  }
+
+  urls.forEach((url) => {
+    const card = document.createElement('div');
+    card.className = 'lan-card';
+
+    const qrWrap = document.createElement('div');
+    qrWrap.className = 'lan-qr';
+    const img = document.createElement('img');
+    img.alt = `QR ${url}`;
+    img.src = lanQrSrc(url);
+    qrWrap.appendChild(img);
+
+    const right = document.createElement('div');
+    right.className = 'lan-url-row';
+
+    const a = document.createElement('a');
+    a.className = 'lan-url';
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noreferrer';
+    a.textContent = url;
+
+    const actions = document.createElement('div');
+    actions.className = 'lan-actions';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'secondary';
+    copyBtn.type = 'button';
+    copyBtn.textContent = '复制地址';
+    copyBtn.addEventListener('click', async () => {
+      const ok = await copyToClipboard(url);
+      alert(
+        ok
+          ? '已复制：粘贴到手机 App 的“电脑端服务器地址”（或用于电脑↔电脑同步的对端地址）。'
+          : '复制失败，请手动选择复制'
+      );
+    });
+
+    actions.appendChild(copyBtn);
+
+    right.appendChild(a);
+    right.appendChild(actions);
+
+    card.appendChild(qrWrap);
+    card.appendChild(right);
+    elements.lanSharePanel.appendChild(card);
+  });
+}
+
 function pickPrimaryLocation(item) {
   if (!item?.locations?.length) return null;
   const web = item.locations.find((l) => isWebLocation(l));
   if (web) return web;
+
+  // Prefer a desktop-openable local location over Android-only content://.
+  const nonAndroidAvailable = item.locations.find((l) => !isWebLocation(l) && !isAndroidUriLocation(l) && l.is_available);
+  if (nonAndroidAvailable) return nonAndroidAvailable;
+  const nonAndroidAny = item.locations.find((l) => !isWebLocation(l) && !isAndroidUriLocation(l));
+  if (nonAndroidAny) return nonAndroidAny;
+
   return item.locations[0] || null;
 }
 
@@ -211,6 +433,25 @@ function updateToolbarControls() {
   if (elements.viewToggleBtn) elements.viewToggleBtn.textContent = `视图：${viewModeLabel(state.viewMode)}`;
   if (elements.emptyTrashBtn) {
     elements.emptyTrashBtn.classList.toggle('hidden', state.library !== 'trash');
+  }
+}
+
+async function handleToggleLanShare() {
+  if (!elements.lanSharePanel) return;
+  const willShow = elements.lanSharePanel.classList.contains('hidden');
+  elements.lanSharePanel.classList.toggle('hidden', !willShow);
+  if (!willShow) return;
+
+  elements.lanSharePanel.innerHTML = '<div class="hint">正在获取局域网地址…</div>';
+  try {
+    const urls = await fetchLanUrls();
+    renderLanSharePanel(urls);
+  } catch (e) {
+    elements.lanSharePanel.innerHTML = '';
+    const err = document.createElement('div');
+    err.className = 'hint';
+    err.textContent = `获取失败：${e?.message || e}`;
+    elements.lanSharePanel.appendChild(err);
   }
 }
 
@@ -729,6 +970,30 @@ function renderDeviceOptions() {
   elements.editMediaDeviceInput.innerHTML = options.join('');
 }
 
+function getDefaultDeviceId() {
+  const first = (state.devices || [])[0];
+  return first?.device_id || '';
+}
+
+function syncAddModalDeviceState() {
+  if (!elements.mediaDeviceInput || !elements.mediaUploadInput || !elements.storageTypeInput) return;
+
+  const hasFile = (elements.mediaUploadInput.files || []).length > 0;
+  if (hasFile) {
+    // Uploads are always saved to the machine running the server.
+    if (elements.storageTypeInput.value !== 'Local') {
+      elements.storageTypeInput.value = 'Local';
+    }
+    const defaultId = getDefaultDeviceId();
+    if (defaultId) {
+      elements.mediaDeviceInput.value = defaultId;
+    }
+    elements.mediaDeviceInput.disabled = true;
+  } else {
+    elements.mediaDeviceInput.disabled = false;
+  }
+}
+
 function buildFolderTree() {
   const byParent = new Map();
   for (const folder of state.folders) {
@@ -1037,7 +1302,9 @@ function renderMediaList() {
     const icon = typeIcon(item.media_type);
     const primaryLoc = pickPrimaryLocation(item);
     const locText = primaryLoc
-      ? (isWebLocation(primaryLoc) ? 'Web' : `本地: ${primaryLoc.path}`)
+      ? (isWebLocation(primaryLoc)
+        ? 'Web'
+        : (isAndroidUriLocation(primaryLoc) ? `手机: ${primaryLoc.path}` : `本地: ${primaryLoc.path}`))
       : '';
     const tagPills = (item.tags || []).slice(0, 2).map((t) => `<span class="tag-pill">${t.tag_name}</span>`).join('');
 
@@ -1110,12 +1377,13 @@ function renderInspector() {
 
   const loc = pickPrimaryLocation(item);
   const mediaType = (item.media_type || '').toLowerCase();
+  const isAndroidOnly = !!loc && !isWebLocation(loc) && isAndroidUriLocation(loc);
 
   if (loc) {
     if (isWebLocation(loc)) {
       elements.openPrimaryBtn.textContent = '打开';
     } else {
-      elements.openPrimaryBtn.textContent = shouldDownloadForLocalOpen() ? '下载' : '打开';
+      elements.openPrimaryBtn.textContent = isAndroidOnly ? '打开' : (shouldDownloadForLocalOpen() ? '下载' : '打开');
     }
   } else {
     elements.openPrimaryBtn.textContent = '打开';
@@ -1133,6 +1401,20 @@ function renderInspector() {
       </div>
     `;
   } else {
+    if (isAndroidOnly) {
+      elements.previewBox.innerHTML = `
+        <div class="preview-empty">
+          ${typeIcon(item.media_type)}
+          <div style="margin-top:8px; font-weight:600;">手机本地文件</div>
+          <div style="margin-top:6px; color: var(--muted); font-size: 12px;">
+            该位置为 Android 的 <code>content://</code> URI，电脑端无法直接预览/打开。
+          </div>
+          <div style="margin-top:6px; color: var(--muted); font-size: 12px;">
+            解决办法：在手机端打开；或通过手机浏览器上传/导入到电脑端（会保存到 uploads）。
+          </div>
+        </div>
+      `;
+    } else {
     const filePath = loc.path || '';
     const ext = (filePath.split('.').pop() || '').toLowerCase();
     const src = `/api/media/${encodeURIComponent(item.item_id)}/preview?locationId=${encodeURIComponent(loc.location_id)}`;
@@ -1159,6 +1441,7 @@ function renderInspector() {
           <div style="margin-top:6px; color: var(--muted); font-size: 12px;">可点击“${actionLabel}”查看原文件</div>
         </div>
       `;
+    }
     }
   }
   elements.detailTitle.textContent = item.title || '';
@@ -1198,12 +1481,15 @@ function renderInspector() {
     elements.tagPicker.innerHTML = '';
     const existing = new Set((item.tags || []).map((t) => t.tag_name));
     (state.tags || []).forEach((t) => {
+      const wrap = document.createElement('span');
+      wrap.className = 'tag-option-wrap';
+
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'tag-option';
       const selected = existing.has(t.tag_name);
       if (selected) btn.classList.add('selected');
-      btn.textContent = t.tag_name;
+      btn.textContent = `${selected ? '✓ ' : ''}${t.tag_name}`;
       btn.addEventListener('click', async (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1212,14 +1498,30 @@ function renderInspector() {
         else next.add(t.tag_name);
         await setItemTags(item.item_id, Array.from(next));
       });
-      elements.tagPicker.appendChild(btn);
+
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'tag-delete';
+      del.title = '删除标签';
+      del.setAttribute('aria-label', `删除标签 ${t.tag_name}`);
+      del.textContent = '✕';
+      del.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        await deleteTag(t);
+      });
+
+      wrap.appendChild(btn);
+      wrap.appendChild(del);
+      elements.tagPicker.appendChild(wrap);
     });
   }
 
   elements.detailNote.value = item.description || '';
 
   elements.openPrimaryBtn.disabled = !pickPrimaryLocation(item);
-  elements.shareBtn.disabled = !pickPrimaryLocation(item);
+  elements.openPrimaryBtn.disabled = !pickPrimaryLocation(item);
+  elements.shareBtn.disabled = !pickPrimaryLocation(item) || isAndroidOnly;
   elements.deleteBtn.disabled = false;
 }
 
@@ -1238,6 +1540,29 @@ async function setItemTags(itemId, tags) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ tags })
   });
+  await fetchMedia();
+}
+
+async function deleteTag(tag) {
+  const tagId = tag?.tag_id || '';
+  const tagName = tag?.tag_name || '';
+  if (!tagId) return;
+  const ok = confirm(`删除标签“${tagName}”？\n仅当该标签未被任何资源使用时才可删除。`);
+  if (!ok) return;
+
+  const res = await fetch(`/api/tags/${encodeURIComponent(tagId)}`, { method: 'DELETE' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error || '删除失败';
+    if (/in use/i.test(msg)) {
+      alert('该标签仍被资源使用，请先从相关资源中移除后再删除。');
+    } else {
+      alert(msg);
+    }
+    return;
+  }
+
+  await fetchBootstrap();
   await fetchMedia();
 }
 
@@ -1424,20 +1749,40 @@ async function addMedia() {
   const selectedFile = elements.mediaUploadInput?.files?.[0] || null;
   if (selectedFile && elements.storageTypeInput.value !== 'Local') {
     alert('已选择文件时，“资源类型”必须是本地文件（Local）。');
-    return;
+    return false;
   }
   let title = elements.mediaTitleInput.value.trim();
   if (!title && selectedFile) {
     title = (selectedFile.name || '').replace(/\.[^./\\]+$/, '').trim();
   }
-  if (!title) return;
+
+  const storageType = elements.storageTypeInput.value;
+  const rawPath = elements.mediaPathInput.value.trim();
+  if (!title && !selectedFile && rawPath) {
+    const lastSeg = rawPath
+      .replace(/[/\\]+$/, '')
+      .split(/[/\\]+/)
+      .filter(Boolean)
+      .pop();
+    title = (lastSeg || '').replace(/\.[^./\\]+$/, '').trim();
+  }
+
+  if (!title) {
+    alert('请输入标题（或填写路径后自动生成标题）。');
+    return false;
+  }
+
+  if (!selectedFile && storageType === 'Local' && !rawPath) {
+    alert('索引本地文件时请填写“路径 / URL”。');
+    return false;
+  }
 
   const tagNames = elements.mediaTagsInput.value
     .split(',')
     .map((tag) => tag.trim())
     .filter(Boolean);
 
-  if (selectedFile && elements.storageTypeInput.value === 'Local') {
+  if (selectedFile && storageType === 'Local') {
     const fd = new FormData();
     fd.append('file', selectedFile);
     fd.append('title', title);
@@ -1456,7 +1801,7 @@ async function addMedia() {
       state.selectedItemId = data.item_id;
     }
   } else {
-    await fetch('/api/media', {
+    const res = await fetch('/api/media', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1465,12 +1810,21 @@ async function addMedia() {
         description: elements.mediaDescriptionInput.value.trim(),
         folderId: elements.mediaFolderInput.value,
         tags: tagNames,
-        storageType: elements.storageTypeInput.value,
-        path: elements.mediaPathInput.value.trim(),
+        storageType,
+        path: rawPath,
         accessInfo: elements.mediaAccessInput.value.trim(),
         deviceId: elements.mediaDeviceInput.value
       })
     });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert(data?.error || '保存失败');
+      return false;
+    }
+    if (data?.item_id) {
+      state.selectedItemId = data.item_id;
+    }
   }
 
   elements.mediaTitleInput.value = '';
@@ -1482,10 +1836,13 @@ async function addMedia() {
 
   await fetchBootstrap();
   await fetchMedia();
+
+  return true;
 }
 
 function openAddModal() {
   elements.addModal.classList.remove('hidden');
+  syncAddModalDeviceState();
   elements.mediaTitleInput.focus();
 }
 
@@ -1539,17 +1896,30 @@ function bindEvents() {
   elements.addDeviceBtn.addEventListener('click', addDevice);
   elements.openAddModalBtn.addEventListener('click', openAddModal);
   elements.closeAddModal.addEventListener('click', closeAddModal);
+  if (elements.mediaUploadInput) {
+    elements.mediaUploadInput.addEventListener('change', () => {
+      syncAddModalDeviceState();
+    });
+  }
+  if (elements.storageTypeInput) {
+    elements.storageTypeInput.addEventListener('change', () => {
+      syncAddModalDeviceState();
+    });
+  }
   elements.addModal.addEventListener('click', (e) => {
     if (e.target === elements.addModal.querySelector('.modal-backdrop')) {
       closeAddModal();
     }
   });
   elements.addMediaBtn.addEventListener('click', async () => {
-    await addMedia();
-    closeAddModal();
+    const ok = await addMedia();
+    if (ok) closeAddModal();
   });
   elements.syncBtn.addEventListener('click', syncWithRemote);
   elements.refreshAvailabilityBtn.addEventListener('click', refreshAvailability);
+  if (elements.showLanShareBtn) {
+    elements.showLanShareBtn.addEventListener('click', handleToggleLanShare);
+  }
   elements.closeEditModal.addEventListener('click', closeEditModal);
   elements.saveEditBtn.addEventListener('click', saveEdit);
   elements.editModal.addEventListener('click', (e) => {
@@ -1667,9 +2037,11 @@ function bindEvents() {
       if (!ok) return;
 
       if (isTrash) {
-        for (const id of itemIds) {
-          await fetch(`/api/media/${encodeURIComponent(id)}?force=1`, { method: 'DELETE' });
-        }
+        await fetch('/api/media/batch/hardDelete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ itemIds })
+        });
       } else {
         await fetch('/api/media/batch/trash', {
           method: 'POST',
@@ -2004,36 +2376,45 @@ function bindEvents() {
     if (!item) return;
     const loc = pickPrimaryLocation(item);
     if (!loc) return;
-    if (isWebLocation(loc)) {
-      window.open(loc.path, '_blank', 'noopener,noreferrer');
-      return;
-    }
 
-     // 移动端/非 localhost：下载到当前设备，而不是让电脑打开默认应用。
-     if (shouldDownloadForLocalOpen()) {
-       const downloadUrl = `/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
-       window.open(downloadUrl, '_blank');
-       return;
-     }
-
-    try {
-      const openUrl = `/api/media/${encodeURIComponent(item.item_id)}/open?locationId=${encodeURIComponent(loc.location_id)}`;
-      const res = await fetch(openUrl, { method: 'POST' });
-      if (res.ok) return;
-    } catch {
-      // ignore
-    }
-
-    const downloadUrl = `/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
-    window.open(downloadUrl, '_blank');
+    await openItemWithUx(item, loc);
   });
+
+  if (elements.transferModal) {
+    elements.transferModal.addEventListener('click', (e) => {
+      if (e.target?.classList?.contains('modal-backdrop')) closeTransferModal();
+    });
+  }
+  if (elements.closeTransferModal) {
+    elements.closeTransferModal.addEventListener('click', closeTransferModal);
+  }
+  if (elements.transferDownloadBtn) {
+    elements.transferDownloadBtn.addEventListener('click', () => {
+      void handleTransferDownload();
+    });
+  }
+  if (elements.transferStreamBtn) {
+    elements.transferStreamBtn.addEventListener('click', handleTransferStream);
+  }
 
   elements.shareBtn.addEventListener('click', async () => {
     const item = getSelectedItem();
     if (!item) return;
     const loc = pickPrimaryLocation(item);
     if (!loc) return;
-    const text = isWebLocation(loc) ? loc.path : loc.path;
+    if (!isWebLocation(loc) && isAndroidUriLocation(loc)) {
+      alert('该资源位置是手机的 content:// URI，电脑端无法生成可下载链接。\n\n建议：在手机端分享文件；或先上传/导入到电脑端 uploads，再分享下载链接。');
+      return;
+    }
+    let text = '';
+    if (isWebLocation(loc)) {
+      text = loc.path || '';
+    } else if (loc.location_id) {
+      const origin = await getSharableOrigin();
+      text = `${origin}/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
+    } else {
+      text = loc.path || '';
+    }
     try {
       await navigator.clipboard.writeText(text);
       alert('已复制到剪贴板');
@@ -2244,6 +2625,7 @@ function bindEvents() {
     hideMediaContextMenu();
     closeAddModal();
     closeEditModal();
+    closeTransferModal();
     cancelInlineRename();
   });
 
@@ -2297,7 +2679,8 @@ function bindEvents() {
         if (isWebLocation(loc)) {
           text = loc.path || '';
         } else {
-          text = `${location.origin}/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
+          const origin = await getSharableOrigin();
+          text = `${origin}/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
         }
         try {
           await navigator.clipboard.writeText(text);
@@ -2313,36 +2696,104 @@ function bindEvents() {
           alert('回收站中的资源无法移动');
           return;
         }
-        const name = prompt('移动到文件夹（输入文件夹名称，需唯一匹配）：');
-        if (!name) return;
-        const matches = (state.folders || []).filter((f) => (f.folder_name || '') === name.trim());
-        if (matches.length !== 1) {
-          alert('未找到唯一匹配的文件夹名称');
+
+        const itemIds = Array.from(state.selectedItemIds.size ? state.selectedItemIds : [item.item_id]);
+        if (itemIds.length >= 2) {
+          alert('多选移动请使用上方“批量操作”栏的“移动到”');
           return;
         }
-        const folderId = matches[0].folder_id;
+
+        openEditModal(item);
+        setTimeout(() => {
+          try {
+            elements.editMediaFolderInput?.focus?.();
+          } catch {}
+        }, 0);
+        return;
+      }
+
+      if (action === 'trash') {
+        hideMediaContextMenu();
+        if (state.library === 'trash' || item.deleted_at) {
+          alert('该资源已在回收站');
+          return;
+        }
+
         const itemIds = Array.from(state.selectedItemIds.size ? state.selectedItemIds : [item.item_id]);
-        await fetch('/api/media/batch/move', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ itemIds, folderId })
-        });
+        const ok = confirm(itemIds.length >= 2
+          ? `删除 ${itemIds.length} 项？（将移入回收站）`
+          : `删除资源：${item.title || ''} ？（将移入回收站）`
+        );
+        if (!ok) return;
+
+        if (itemIds.length >= 2) {
+          await fetch('/api/media/batch/trash', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ itemIds })
+          });
+        } else {
+          await fetch(`/api/media/${encodeURIComponent(item.item_id)}`, { method: 'DELETE' });
+        }
+
+        clearSelection();
+        await fetchBootstrap();
         await fetchMedia();
         return;
       }
-      if (action === 'addTags' || action === 'removeTags') {
+
+      if (action === 'restore') {
         hideMediaContextMenu();
-        const raw = prompt(action === 'addTags' ? '添加标签（逗号分隔）：' : '移除标签（逗号分隔）：');
-        if (!raw) return;
-        const tags = raw.split(',').map((t) => t.trim()).filter(Boolean);
-        if (!tags.length) return;
+        if (!(state.library === 'trash' || item.deleted_at)) {
+          alert('该资源不在回收站');
+          return;
+        }
+
         const itemIds = Array.from(state.selectedItemIds.size ? state.selectedItemIds : [item.item_id]);
-        await fetch(action === 'addTags' ? '/api/media/batch/tags' : '/api/media/batch/untag', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ itemIds, tags })
-        });
+        if (itemIds.length >= 2) {
+          await fetch('/api/media/batch/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ itemIds })
+          });
+        } else {
+          await fetch(`/api/media/${encodeURIComponent(item.item_id)}/restore`, { method: 'POST' });
+        }
+
+        clearSelection();
+        await fetchBootstrap();
         await fetchMedia();
+        return;
+      }
+
+      if (action === 'hardDelete') {
+        hideMediaContextMenu();
+        if (!(state.library === 'trash' || item.deleted_at)) {
+          alert('仅回收站中的资源可永久删除');
+          return;
+        }
+
+        const itemIds = Array.from(state.selectedItemIds.size ? state.selectedItemIds : [item.item_id]);
+        const ok = confirm(itemIds.length >= 2
+          ? `永久删除 ${itemIds.length} 项？该操作不可恢复。`
+          : `永久删除资源：${item.title || ''} ？该操作不可恢复。`
+        );
+        if (!ok) return;
+
+        if (itemIds.length >= 2) {
+          await fetch('/api/media/batch/hardDelete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ itemIds })
+          });
+        } else {
+          await fetch(`/api/media/${encodeURIComponent(item.item_id)}?force=1`, { method: 'DELETE' });
+        }
+
+        clearSelection();
+        await fetchBootstrap();
+        await fetchMedia();
+        return;
       }
     });
   }
@@ -2367,6 +2818,7 @@ function hideFolderContextMenu() {
 function showMediaContextMenu(x, y) {
   const menu = elements.mediaContextMenu;
   if (!menu) return;
+  updateMediaContextMenuVisibility();
   menu.classList.remove('hidden');
   const { innerWidth, innerHeight } = window;
   const rect = menu.getBoundingClientRect();
@@ -2380,6 +2832,20 @@ function hideMediaContextMenu() {
   mediaContextTargetId = null;
   mediaContextLocationId = null;
   if (elements.mediaContextMenu) elements.mediaContextMenu.classList.add('hidden');
+}
+
+function setContextActionVisible(action, visible) {
+  const btn = elements.mediaContextMenu?.querySelector?.(`button[data-action="${action}"]`);
+  if (!btn) return;
+  btn.classList.toggle('hidden', !visible);
+}
+
+function updateMediaContextMenuVisibility() {
+  const inTrash = state.library === 'trash';
+  setContextActionVisible('trash', !inTrash);
+  setContextActionVisible('restore', inTrash);
+  setContextActionVisible('hardDelete', inTrash);
+  setContextActionVisible('moveTo', !inTrash);
 }
 
 function getItemById(itemId) {
@@ -2400,24 +2866,7 @@ function getLocationForContext(item) {
 async function openItemFromContext(item) {
   const loc = getLocationForContext(item);
   if (!loc) return;
-  if (isWebLocation(loc)) {
-    window.open(loc.path, '_blank', 'noopener,noreferrer');
-    return;
-  }
-  if (shouldDownloadForLocalOpen()) {
-    const downloadUrl = `/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
-    window.open(downloadUrl, '_blank');
-    return;
-  }
-  try {
-    const openUrl = `/api/media/${encodeURIComponent(item.item_id)}/open?locationId=${encodeURIComponent(loc.location_id)}`;
-    const res = await fetch(openUrl, { method: 'POST' });
-    if (res.ok) return;
-  } catch {
-    // ignore
-  }
-  const downloadUrl = `/api/media/${encodeURIComponent(item.item_id)}/download?locationId=${encodeURIComponent(loc.location_id)}`;
-  window.open(downloadUrl, '_blank');
+  await openItemWithUx(item, loc);
 }
 
 async function init() {

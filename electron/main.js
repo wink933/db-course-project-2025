@@ -35,9 +35,10 @@ if (!app.isPackaged) {
   process.env.__LEGACY_USER_DATA = legacyUserDataPath;
 }
 
-const DEFAULT_PORT = process.env.ELECTRON_PORT || process.env.PORT || 4000;
+const DEFAULT_PORT = Number(process.env.ELECTRON_PORT || process.env.PORT || 4000);
 const DEFAULT_HOST = process.env.ELECTRON_HOST || process.env.HOST || (app.isPackaged ? '0.0.0.0' : '127.0.0.1');
 let mainWindow;
+let runtimePort = DEFAULT_PORT;
 
 function listLanUrls(actualPort) {
   const ifaces = os.networkInterfaces();
@@ -52,7 +53,7 @@ function listLanUrls(actualPort) {
   return urls;
 }
 
-function createWindow() {
+function createWindow(portToUse) {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -62,13 +63,61 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadURL(`http://localhost:${DEFAULT_PORT}`);
+  mainWindow.loadURL(`http://localhost:${portToUse}`);
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
 }
 
-app.whenReady().then(() => {
+function waitForServer(server) {
+  return new Promise((resolve, reject) => {
+    const onListening = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err) => {
+      cleanup();
+      reject(err);
+    };
+    const cleanup = () => {
+      server.off('listening', onListening);
+      server.off('error', onError);
+    };
+
+    server.once('listening', onListening);
+    server.once('error', onError);
+  });
+}
+
+async function startServerWithFallback({ startServer, stopServer, startPort, host, tries = 10 }) {
+  let lastErr = null;
+  const basePort = Number(startPort);
+  for (let offset = 0; offset < tries; offset += 1) {
+    const port = basePort + offset;
+    let server;
+    try {
+      server = startServer({ port, host });
+      await waitForServer(server);
+      const actualPort = server?.address?.()?.port ?? port;
+      return { server, actualPort, usedPort: port };
+    } catch (err) {
+      lastErr = err;
+      const code = err?.code;
+
+      // Clean up so the next attempt can call startServer again.
+      try { stopServer(); } catch {}
+
+      if (code === 'EADDRINUSE') {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr || new Error('No available port');
+}
+
+app.whenReady().then(async () => {
   const userDataPath = app.getPath('userData');
   process.env.DATA_DIR = userDataPath;
   process.env.DB_PATH = path.join(userDataPath, 'media-archive.db');
@@ -127,28 +176,58 @@ app.whenReady().then(() => {
     app.quit();
     return;
   }
-  const server = startServer({ port: DEFAULT_PORT, host: DEFAULT_HOST });
-  server.on('listening', () => {
+
+  let server;
+  try {
+    const result = await startServerWithFallback({
+      startServer,
+      stopServer,
+      startPort: DEFAULT_PORT,
+      host: DEFAULT_HOST,
+      tries: 10
+    });
+    server = result.server;
+    runtimePort = result.actualPort;
+
+    if (Number(result.usedPort) !== Number(DEFAULT_PORT)) {
+      dialog.showMessageBox({
+        type: 'warning',
+        title: '端口已自动调整',
+        message: `端口 ${DEFAULT_PORT} 已被占用，已自动改用 ${runtimePort}。`,
+        detail: `如需固定端口，可关闭占用 ${DEFAULT_PORT} 的程序，或设置环境变量 ELECTRON_PORT。`
+      }).catch(() => {});
+    }
+  } catch (error) {
+    const msg = error?.code === 'EADDRINUSE'
+      ? `端口 ${DEFAULT_PORT} 被占用，且未找到可用端口。`
+      : (error?.message || String(error));
+    console.error('[electron] failed to start server:', error);
     try {
-      if (DEFAULT_HOST === '0.0.0.0') {
-        const actualPort = server?.address?.()?.port ?? DEFAULT_PORT;
-        const urls = listLanUrls(actualPort);
-        if (urls.length) {
-          dialog.showMessageBox({
-            type: 'info',
-            title: '手机访问地址',
-            message: '同一 Wi‑Fi 下可用手机浏览器访问：',
-            detail: urls.join('\n')
-          }).catch(() => {});
-        }
-      }
+      dialog.showErrorBox('MediArchive Pro 启动失败', msg);
     } catch {}
-    createWindow();
-  });
+    app.quit();
+    return;
+  }
+
+  try {
+    if (DEFAULT_HOST === '0.0.0.0') {
+      const urls = listLanUrls(runtimePort);
+      if (urls.length) {
+        dialog.showMessageBox({
+          type: 'info',
+          title: '手机访问地址',
+          message: '同一 Wi‑Fi 下可用手机浏览器访问：',
+          detail: urls.join('\n')
+        }).catch(() => {});
+      }
+    }
+  } catch {}
+
+  createWindow(runtimePort);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      createWindow(runtimePort);
     }
   });
 

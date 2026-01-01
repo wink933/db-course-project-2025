@@ -1,0 +1,5 @@
+<resources>
+  <!-- Minimal brand colors used for app icon + splash background -->
+  <color name="brand_icon_bg">#6750A4</color>
+  <color name="splash_bg">#FFFFFF</color>
+</resources>
