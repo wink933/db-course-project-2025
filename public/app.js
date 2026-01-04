@@ -210,7 +210,7 @@ function normalizeSyncEndpoint(raw) {
 function openTransferModal(item, loc) {
   if (!elements.transferModal) return;
   transferModalState = { item, loc };
-  elements.transferModalDesc.innerHTML = `该资源位于其他设备（例如手机）。\n\n请选择：\n- 下载到本机：把文件拉取并保存到本机 uploads\n- 流式传输：不落盘，直接从对端读取`;
+  elements.transferModalDesc.innerHTML = `该资源位于其他设备（例如另一台电脑或手机）。\n\n请选择：\n- 下载到本机：把文件拉取并保存到本机 uploads\n- 流式传输：不落盘，直接从对端读取`;
   elements.transferModal.classList.remove('hidden');
 }
 
@@ -226,7 +226,7 @@ async function handleTransferDownload() {
   if (!item || !loc) return;
 
   try {
-    const res = await fetch('/api/transfer/pull-from-phone', {
+    const res = await fetch('/api/transfer/pull-from-device', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ locationId: loc.location_id })
@@ -293,6 +293,19 @@ async function openItemWithUx(item, loc) {
     const openUrl = `/api/media/${encodeURIComponent(item.item_id)}/open?locationId=${encodeURIComponent(loc.location_id)}`;
     const res = await fetch(openUrl, { method: 'POST' });
     if (res.ok) return;
+
+    if (res.status === 409) {
+      let data = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+      if (data?.code === 'REMOTE_LOCATION') {
+        openTransferModal(item, loc);
+        return;
+      }
+    }
   } catch {
     // ignore
   }

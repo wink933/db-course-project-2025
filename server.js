@@ -271,6 +271,23 @@ function isAndroidUriPath(location) {
   return access === 'android_uri' || /^content:\/\//i.test(p);
 }
 
+function looksLikeForeignPathForCurrentPlatform(rawPath) {
+  const p = (rawPath || '').toString().trim();
+  if (!p) return false;
+
+  // On non-Windows, a Windows drive path (C:\ / C:/) is never a valid local absolute path.
+  if (process.platform !== 'win32') {
+    if (path.win32.isAbsolute(p)) return true;
+    return false;
+  }
+
+  // On Windows, POSIX-looking roots are technically absolute, but are almost always foreign when
+  // they point to common macOS/Linux roots.
+  const lower = p.toLowerCase();
+  if (lower.startsWith('/users/') || lower.startsWith('/home/') || lower.startsWith('/volumes/')) return true;
+  return false;
+}
+
 function safeParseHttpUrl(raw) {
   const text = (raw || '').toString().trim();
   if (!text) return null;
@@ -408,9 +425,30 @@ app.get('/api/media/:itemId/preview', (req, res) => {
     return;
   }
 
+  if (looksLikeForeignPathForCurrentPlatform(location.path)) {
+    const dev = location.device_id
+      ? db.prepare('SELECT device_id, device_name, device_type, lan_url, transfer_token FROM devices WHERE device_id = ? LIMIT 1').get(location.device_id)
+      : null;
+    res.status(409).json({
+      error: 'Resource is stored on another device.',
+      code: 'REMOTE_LOCATION',
+      device: dev || null,
+      location_id: location.location_id
+    });
+    return;
+  }
+
   const normalized = path.normalize(location.path);
   if (!path.isAbsolute(normalized)) {
-    res.status(400).json({ error: 'Invalid stored path' });
+    const dev = location.device_id
+      ? db.prepare('SELECT device_id, device_name, device_type, lan_url, transfer_token FROM devices WHERE device_id = ? LIMIT 1').get(location.device_id)
+      : null;
+    res.status(400).json({
+      error: 'Invalid stored path',
+      hint: dev ? 'This location may belong to another device. Try download/stream.' : undefined,
+      device: dev || null,
+      location_id: location.location_id
+    });
     return;
   }
 
@@ -472,6 +510,19 @@ app.get('/api/media/:itemId/download', (req, res) => {
     return;
   }
 
+  if (looksLikeForeignPathForCurrentPlatform(location.path)) {
+    const dev = location.device_id
+      ? db.prepare('SELECT device_id, device_name, device_type, lan_url, transfer_token FROM devices WHERE device_id = ? LIMIT 1').get(location.device_id)
+      : null;
+    res.status(409).json({
+      error: 'Resource is stored on another device.',
+      code: 'REMOTE_LOCATION',
+      device: dev || null,
+      location_id: location.location_id
+    });
+    return;
+  }
+
   const candidate = resolveExistingPath(location.path);
   if (!candidate) {
     res.status(404).json({ error: 'File not found' });
@@ -529,8 +580,34 @@ app.post('/api/media/:itemId/open', (req, res) => {
     return;
   }
 
+  if (looksLikeForeignPathForCurrentPlatform(location.path)) {
+    const dev = location.device_id
+      ? db.prepare('SELECT device_id, device_name, device_type, lan_url, transfer_token FROM devices WHERE device_id = ? LIMIT 1').get(location.device_id)
+      : null;
+    res.status(409).json({
+      error: 'Resource is stored on another device.',
+      code: 'REMOTE_LOCATION',
+      device: dev || null,
+      location_id: location.location_id
+    });
+    return;
+  }
+
   const candidate = resolveExistingPath(location.path);
   if (!candidate) {
+    // If it looks like a foreign path style (e.g. /Users/... on Windows), treat it as remote.
+    if (looksLikeForeignPathForCurrentPlatform(location.path)) {
+      const dev = location.device_id
+        ? db.prepare('SELECT device_id, device_name, device_type, lan_url, transfer_token FROM devices WHERE device_id = ? LIMIT 1').get(location.device_id)
+        : null;
+      res.status(409).json({
+        error: 'Resource is stored on another device.',
+        code: 'REMOTE_LOCATION',
+        device: dev || null,
+        location_id: location.location_id
+      });
+      return;
+    }
     res.status(404).json({ error: 'File not found' });
     return;
   }
@@ -543,26 +620,42 @@ app.post('/api/media/:itemId/open', (req, res) => {
   }
 });
 
-// On-demand LAN file transfer: pull an Android content:// location from the phone
-// (phone runs an in-app LAN file server) and import it to desktop uploads.
-function resolvePhoneFileUrlFromDevice(locationId) {
+// On-demand LAN file transfer (device -> desktop uploads):
+// - Android: remote app serves /api/ma/location
+// - PC: remote desktop serves /api/transfer/stream-local
+function resolveDeviceFileUrlFromLocation(locationId) {
   const loc = db.prepare('SELECT * FROM storage_locations WHERE location_id = ? LIMIT 1').get(locationId);
   if (!loc) return { error: 'Location not found' };
-  if (!isAndroidUriPath(loc)) return { error: 'Location is not an Android content:// uri' };
 
   const deviceId = asNonEmptyString(loc.device_id);
-  if (!deviceId) return { error: 'Android location has no device_id' };
+  if (!deviceId) return { error: 'Location has no device_id' };
 
   const dev = db.prepare('SELECT * FROM devices WHERE device_id = ? LIMIT 1').get(deviceId);
   const lanUrlRaw = asNonEmptyString(dev?.lan_url);
   const token = asNonEmptyString(dev?.transfer_token);
   const lanUrl = safeParseHttpUrl(lanUrlRaw);
-  if (!lanUrl) return { error: 'Phone LAN URL missing. Open phone app once and run sync to publish its LAN address.' };
+  if (!lanUrl) {
+    const hint = isAndroidUriPath(loc)
+      ? 'Phone LAN URL missing. Open phone app once and run sync to publish its LAN address.'
+      : 'Device LAN URL missing. Open that device once and run sync to publish its LAN address.';
+    return { error: hint };
+  }
 
-  // Normalize to origin; keep token from db.
   const origin = lanUrl.origin;
-  const url = `${origin}/api/ma/location?locationId=${encodeURIComponent(locationId)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
-  return { url, device: dev, location: loc };
+  if (isAndroidUriPath(loc)) {
+    const url = `${origin}/api/ma/location?locationId=${encodeURIComponent(locationId)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+    return { url, device: dev, location: loc, kind: 'android' };
+  }
+
+  const url = `${origin}/api/transfer/stream-local?locationId=${encodeURIComponent(locationId)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+  return { url, device: dev, location: loc, kind: 'pc' };
+}
+
+function requireTransferTokenIfConfigured(deviceRow, tokenFromQuery) {
+  const expected = asNonEmptyString(deviceRow?.transfer_token);
+  if (!expected) return true;
+  const got = asNonEmptyString(tokenFromQuery);
+  return got === expected;
 }
 
 app.get('/api/transfer/stream-from-device', (req, res) => {
@@ -572,17 +665,68 @@ app.get('/api/transfer/stream-from-device', (req, res) => {
     return;
   }
 
-  const resolved = resolvePhoneFileUrlFromDevice(locationId);
+  const resolved = resolveDeviceFileUrlFromLocation(locationId);
   if (resolved.error) {
     res.status(400).json({ error: resolved.error });
     return;
   }
 
-  // Redirect to the phone server stream URL. Browser will handle Range itself.
+  // Redirect to the remote device stream URL. Browser will handle Range itself.
   res.redirect(302, resolved.url);
 });
 
-app.post('/api/transfer/pull-from-phone', async (req, res) => {
+// Remote desktops call this endpoint to stream a local file (not Android content://).
+// If devices.transfer_token is set on this server for the owning device row, require it.
+app.get('/api/transfer/stream-local', (req, res) => {
+  const locationId = asNonEmptyString(req.query?.locationId);
+  if (!locationId) {
+    res.status(400).json({ error: 'Missing locationId' });
+    return;
+  }
+
+  const loc = db.prepare('SELECT * FROM storage_locations WHERE location_id = ? LIMIT 1').get(locationId);
+  if (!loc) {
+    res.status(404).json({ error: 'Location not found' });
+    return;
+  }
+
+  if (isAndroidUriPath(loc)) {
+    res.status(400).json({ error: 'Android content:// location must be streamed from the phone.' });
+    return;
+  }
+
+  const devId = asNonEmptyString(loc.device_id);
+  if (!devId) {
+    res.status(400).json({ error: 'Location has no device_id' });
+    return;
+  }
+
+  const dev = db.prepare('SELECT * FROM devices WHERE device_id = ? LIMIT 1').get(devId);
+  if (!dev) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+
+  if (!requireTransferTokenIfConfigured(dev, req.query?.token)) {
+    res.status(403).json({ error: 'Invalid token' });
+    return;
+  }
+
+  const candidate = resolveExistingPath(loc.path);
+  if (!candidate) {
+    res.status(404).json({ error: 'File not found' });
+    return;
+  }
+
+  // Provide a filename hint for the pulling side.
+  res.setHeader('X-MA-Filename', path.basename(candidate));
+  res.setHeader('Content-Disposition', contentDisposition(path.basename(candidate), { type: 'inline' }));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  setKnownContentType(res, candidate);
+  res.sendFile(candidate);
+});
+
+async function handlePullFromDevice(req, res) {
   // Security: only allow localhost to trigger pulling files onto this machine.
   const remote = req.socket?.remoteAddress || req.ip;
   if (!isLoopbackAddress(remote)) {
@@ -595,13 +739,14 @@ app.post('/api/transfer/pull-from-phone', async (req, res) => {
     res.status(400).json({ error: 'Missing locationId' });
     return;
   }
-  const resolved = resolvePhoneFileUrlFromDevice(locationId);
+
+  const resolved = resolveDeviceFileUrlFromLocation(locationId);
   if (resolved.error) {
     res.status(400).json({ error: resolved.error });
     return;
   }
   const fileUrl = resolved.url;
-  const androidLoc = resolved.location;
+  const sourceLoc = resolved.location;
 
   const userId = getOwnerId();
   const deviceRow = db.prepare('SELECT device_id FROM devices WHERE user_id = ? ORDER BY created_at LIMIT 1').get(userId);
@@ -642,7 +787,7 @@ app.post('/api/transfer/pull-from-phone', async (req, res) => {
     await pipeline(Readable.fromWeb(resp.body), fs.createWriteStream(destAbs));
 
     const newLocationId = uuidv4();
-    const itemId = androidLoc.item_id;
+    const itemId = sourceLoc.item_id;
     const tx = db.transaction(() => {
       db.prepare(`
         INSERT INTO storage_locations (location_id, item_id, device_id, storage_type, path, access_info, is_available, created_at, updated_at)
@@ -656,13 +801,22 @@ app.post('/api/transfer/pull-from-phone', async (req, res) => {
     res.json({ ok: true, item_id: itemId, location_id: newLocationId, path: destAbs });
   } catch (e) {
     const message = e?.name === 'AbortError'
-      ? 'Phone fetch timed out. Ensure phone and PC are on the same Wi‑Fi and the phone app is open.'
-      : (e?.message || 'Failed to pull from phone');
+      ? 'Device fetch timed out. Ensure both devices are on the same Wi‑Fi and the source device server is reachable.'
+      : (e?.message || 'Failed to pull from device');
     res.status(502).json({
       error: message,
-      hint: 'Check phone LAN URL (devices.lan_url), firewall, and that the phone in-app LAN server is reachable.'
+      hint: 'Check device LAN URL (devices.lan_url), firewall, and that the source device server is reachable.'
     });
   }
+}
+
+app.post('/api/transfer/pull-from-device', (req, res) => {
+  void handlePullFromDevice(req, res);
+});
+
+// Backward-compatible alias
+app.post('/api/transfer/pull-from-phone', (req, res) => {
+  void handlePullFromDevice(req, res);
 });
 
 function now() {
@@ -2094,6 +2248,96 @@ function listLanUrls(actualPort) {
   return urls;
 }
 
+function localDeviceMetaPath() {
+  return path.join(path.dirname(dbPath), 'local-device.json');
+}
+
+function readLocalDeviceIdFromMeta() {
+  try {
+    const raw = fs.readFileSync(localDeviceMetaPath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    const id = asNonEmptyString(parsed?.device_id);
+    return id || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalDeviceIdToMeta(deviceId) {
+  try {
+    fs.writeFileSync(localDeviceMetaPath(), JSON.stringify({ device_id: deviceId }, null, 2), 'utf8');
+  } catch {
+    // ignore
+  }
+}
+
+function ensureLocalDeviceId() {
+  const userId = getOwnerId();
+  if (!userId) return null;
+
+  const fromMeta = readLocalDeviceIdFromMeta();
+  if (fromMeta) {
+    const exists = db.prepare('SELECT device_id FROM devices WHERE user_id = ? AND device_id = ? LIMIT 1').get(userId, fromMeta);
+    if (exists?.device_id) return exists.device_id;
+  }
+
+  const hostLabel = (() => {
+    try {
+      const h = (os.hostname?.() || '').toString().trim();
+      return h || '本机设备';
+    } catch {
+      return '本机设备';
+    }
+  })();
+
+  // Prefer a PC device with name matching current hostname.
+  const byName = db.prepare(
+    'SELECT device_id FROM devices WHERE user_id = ? AND device_type = ? AND device_name = ? ORDER BY created_at ASC LIMIT 1'
+  ).get(userId, 'PC', hostLabel);
+  if (byName?.device_id) {
+    writeLocalDeviceIdToMeta(byName.device_id);
+    return byName.device_id;
+  }
+
+  // Fallback: first PC device.
+  const firstPc = db.prepare(
+    'SELECT device_id FROM devices WHERE user_id = ? AND device_type = ? ORDER BY created_at ASC LIMIT 1'
+  ).get(userId, 'PC');
+  if (firstPc?.device_id) {
+    writeLocalDeviceIdToMeta(firstPc.device_id);
+    return firstPc.device_id;
+  }
+
+  // Last resort: create one.
+  const deviceId = uuidv4();
+  db.prepare(
+    'INSERT INTO devices (device_id, user_id, device_name, device_type, last_sync_time, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(deviceId, userId, hostLabel, 'PC', now(), now(), now());
+  writeLocalDeviceIdToMeta(deviceId);
+  return deviceId;
+}
+
+function publishLocalDeviceNetworkInfo(actualPort, resolvedHost) {
+  // Only publish LAN URL when listening on all interfaces.
+  if (resolvedHost !== '0.0.0.0') return;
+
+  const deviceId = ensureLocalDeviceId();
+  if (!deviceId) return;
+
+  const urls = listLanUrls(actualPort);
+  if (!urls.length) return;
+
+  const lanUrl = urls[0];
+  const token = uuidv4();
+  try {
+    db.prepare(
+      'UPDATE devices SET lan_url = ?, transfer_token = COALESCE(transfer_token, ?), updated_at = ? WHERE device_id = ?'
+    ).run(lanUrl, token, now(), deviceId);
+  } catch {
+    // ignore
+  }
+}
+
 function startServer(options = {}) {
   if (serverInstance) {
     return serverInstance;
@@ -2114,6 +2358,13 @@ function startServer(options = {}) {
         console.log('LAN URLs:');
         urls.forEach((u) => console.log(`  ${u}`));
       }
+    }
+
+    // Publish our LAN URL and transfer token into the local device row for desktop↔desktop transfers.
+    try {
+      publishLocalDeviceNetworkInfo(actualPort, resolvedHost);
+    } catch {
+      // ignore
     }
   });
 
