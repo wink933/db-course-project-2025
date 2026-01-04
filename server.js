@@ -753,6 +753,7 @@ async function handlePullFromDevice(req, res) {
   }
   const fileUrl = resolved.url;
   const sourceLoc = resolved.location;
+  const sourceDevice = resolved.device || null;
 
   const userId = getOwnerId();
   const deviceRow = db.prepare('SELECT device_id FROM devices WHERE user_id = ? ORDER BY created_at LIMIT 1').get(userId);
@@ -774,7 +775,16 @@ async function handlePullFromDevice(req, res) {
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
-      res.status(502).json({ error: `Phone server error: ${resp.status} ${text || ''}`.trim() });
+      res.status(502).json({
+        error: `Device server error: ${resp.status} ${text || ''}`.trim(),
+        hint: 'Ensure the source device server is running and reachable on the LAN address shown in its LAN URLs panel.',
+        device: sourceDevice ? {
+          device_id: sourceDevice.device_id,
+          device_name: sourceDevice.device_name,
+          device_type: sourceDevice.device_type,
+          lan_url: sourceDevice.lan_url
+        } : null
+      });
       return;
     }
 
@@ -814,12 +824,40 @@ async function handlePullFromDevice(req, res) {
 
     res.json({ ok: true, item_id: itemId, location_id: newLocationId, path: destAbs });
   } catch (e) {
-    const message = e?.name === 'AbortError'
-      ? 'Device fetch timed out. Ensure both devices are on the same Wi‑Fi and the source device server is reachable.'
-      : (e?.message || 'Failed to pull from device');
+    const cause = e?.cause || null;
+    const causeCode = (cause?.code || cause?.errno || '').toString();
+    const causeMsg = (cause?.message || '').toString();
+
+    const baseHint = '检查：两台设备同一 Wi‑Fi；对端桌面端已启动（Electron 打包版默认 0.0.0.0）；防火墙放行端口；对端“局域网地址”可在 UI 的“LAN URLs”面板查看。';
+    let message = e?.message || 'Failed to pull from device';
+
+    if (e?.name === 'AbortError') {
+      message = 'Device fetch timed out.';
+    } else if (causeCode) {
+      message = `Device fetch failed (${causeCode}).`;
+    } else if (message.toLowerCase() === 'fetch failed') {
+      message = 'Device fetch failed.';
+    }
+
+    const safeUrl = (() => {
+      try {
+        const u = new URL(fileUrl);
+        if (u.searchParams.has('token')) u.searchParams.set('token', '***');
+        return u.toString();
+      } catch {
+        return '';
+      }
+    })();
+
     res.status(502).json({
       error: message,
-      hint: 'Check device LAN URL (devices.lan_url), firewall, and that the source device server is reachable.'
+      hint: [baseHint, causeMsg ? `细节：${causeMsg}` : '', safeUrl ? `请求：${safeUrl}` : ''].filter(Boolean).join('\n'),
+      device: sourceDevice ? {
+        device_id: sourceDevice.device_id,
+        device_name: sourceDevice.device_name,
+        device_type: sourceDevice.device_type,
+        lan_url: sourceDevice.lan_url
+      } : null
     });
   }
 }
@@ -2251,13 +2289,62 @@ const host = process.env.HOST || '127.0.0.1';
 
 function listLanUrls(actualPort) {
   const ifaces = os.networkInterfaces();
-  const urls = [];
+  const candidates = [];
+
+  const parseIpv4 = (ip) => {
+    const parts = (ip || '').toString().trim().split('.').map((x) => Number(x));
+    if (parts.length !== 4) return null;
+    if (parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    return parts;
+  };
+
+  const inCidr = (parts, a, b, c, d, maskBits) => {
+    const ip = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+    const net = (((a << 24) | (b << 16) | (c << 8) | d) >>> 0);
+    const mask = maskBits === 0 ? 0 : ((0xffffffff << (32 - maskBits)) >>> 0);
+    return (ip & mask) === (net & mask);
+  };
+
+  const scoreIp = (ip) => {
+    const parts = parseIpv4(ip);
+    if (!parts) return -1;
+
+    // Exclude unusable/reserved ranges for LAN publishing.
+    if (inCidr(parts, 127, 0, 0, 0, 8)) return -1; // loopback
+    if (inCidr(parts, 0, 0, 0, 0, 8)) return -1; // "this" network
+    if (inCidr(parts, 169, 254, 0, 0, 16)) return -1; // link-local
+    if (inCidr(parts, 198, 18, 0, 0, 15)) return -1; // benchmark testing (198.18.0.0/15)
+
+    // Prefer RFC1918 private LAN.
+    if (inCidr(parts, 10, 0, 0, 0, 8)) return 300;
+    if (inCidr(parts, 192, 168, 0, 0, 16)) return 300;
+    if (inCidr(parts, 172, 16, 0, 0, 12)) return 300;
+
+    // CGNAT (often works on some networks / hotspots)
+    if (inCidr(parts, 100, 64, 0, 0, 10)) return 200;
+
+    // Otherwise: keep as a last resort.
+    return 100;
+  };
+
   for (const name of Object.keys(ifaces)) {
     for (const addr of ifaces[name] || []) {
       if (!addr || addr.family !== 'IPv4') continue;
       if (addr.internal) continue;
-      urls.push(`http://${addr.address}:${actualPort}`);
+      const ip = (addr.address || '').toString().trim();
+      const score = scoreIp(ip);
+      if (score < 0) continue;
+      candidates.push({ ip, score });
     }
+  }
+
+  candidates.sort((a, b) => b.score - a.score || a.ip.localeCompare(b.ip));
+  const seen = new Set();
+  const urls = [];
+  for (const c of candidates) {
+    if (seen.has(c.ip)) continue;
+    seen.add(c.ip);
+    urls.push(`http://${c.ip}:${actualPort}`);
   }
   return urls;
 }

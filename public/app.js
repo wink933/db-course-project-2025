@@ -240,7 +240,8 @@ async function handleTransferDownload() {
       text = await res.text().catch(() => '');
     }
     if (!res.ok) {
-      alert(data?.error || text || '下载失败');
+      const msg = [data?.error || text || '下载失败', data?.hint].filter(Boolean).join('\n\n');
+      alert(msg);
       return;
     }
 
