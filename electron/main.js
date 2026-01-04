@@ -42,15 +42,63 @@ let runtimePort = DEFAULT_PORT;
 
 function listLanUrls(actualPort) {
   const ifaces = os.networkInterfaces();
-  const urls = [];
+  const candidates = [];
+
+  const parseIpv4 = (ip) => {
+    const parts = (ip || '').toString().trim().split('.').map((x) => Number(x));
+    if (parts.length !== 4) return null;
+    if (parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    return parts;
+  };
+
+  const inCidr = (parts, a, b, c, d, maskBits) => {
+    const ip = ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+    const net = (((a << 24) | (b << 16) | (c << 8) | d) >>> 0);
+    const mask = maskBits === 0 ? 0 : ((0xffffffff << (32 - maskBits)) >>> 0);
+    return (ip & mask) === (net & mask);
+  };
+
+  const scoreInterfaceName = (name) => {
+    const n = (name || '').toString().toLowerCase();
+    if (!n) return 0;
+    if (n.includes('wi-fi') || n.includes('wifi') || n.includes('wlan') || n.includes('wireless')) return 80;
+    if (n === 'en0') return 70;
+    if (n.startsWith('wl') || n.startsWith('wlan')) return 60;
+    if (n.includes('docker') || n.includes('vmnet') || n.includes('vbox') || n.includes('virtual') || n.includes('hyper') || n.includes('wsl') || n.includes('tap') || n.includes('tun') || n.includes('utun') || n.includes('hamachi')) {
+      return -50;
+    }
+    return 0;
+  };
+
+  const scoreIp = (ip) => {
+    const parts = parseIpv4(ip);
+    if (!parts) return -1;
+    if (inCidr(parts, 127, 0, 0, 0, 8)) return -1;
+    if (inCidr(parts, 0, 0, 0, 0, 8)) return -1;
+    if (inCidr(parts, 169, 254, 0, 0, 16)) return -1;
+    if (inCidr(parts, 198, 18, 0, 0, 15)) return -1;
+
+    if (inCidr(parts, 10, 0, 0, 0, 8)) return 300;
+    if (inCidr(parts, 192, 168, 0, 0, 16)) return 300;
+    if (inCidr(parts, 172, 16, 0, 0, 12)) return 300;
+    if (inCidr(parts, 100, 64, 0, 0, 10)) return 200;
+    return 100;
+  };
+
   for (const name of Object.keys(ifaces)) {
     for (const addr of ifaces[name] || []) {
       if (!addr || addr.family !== 'IPv4') continue;
       if (addr.internal) continue;
-      urls.push(`http://${addr.address}:${actualPort}`);
+      const ip = (addr.address || '').toString().trim();
+      const score = scoreIp(ip) + scoreInterfaceName(name);
+      if (score < 0) continue;
+      candidates.push({ ip, score });
     }
   }
-  return urls;
+
+  candidates.sort((a, b) => b.score - a.score || a.ip.localeCompare(b.ip));
+  const best = candidates[0]?.ip;
+  return best ? [`http://${best}:${actualPort}`] : [];
 }
 
 function createWindow(portToUse) {

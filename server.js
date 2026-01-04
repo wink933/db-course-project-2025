@@ -307,8 +307,8 @@ app.get('/api/server/lan-urls', (req, res) => {
   try {
     const addr = serverInstance?.address?.();
     const port = typeof addr === 'object' && addr ? addr.port : Number(process.env.PORT || 4000);
-    const urls = listLanUrls(port);
-    res.json({ urls });
+    const preferred = pickPreferredLanUrl(port);
+    res.json({ urls: preferred ? [preferred] : [] });
   } catch {
     res.json({ urls: [] });
   }
@@ -2327,14 +2327,44 @@ function listLanUrls(actualPort) {
     return 100;
   };
 
+  const scoreInterfaceName = (name) => {
+    const n = (name || '').toString().toLowerCase();
+    if (!n) return 0;
+
+    // Prefer wireless.
+    if (n.includes('wi-fi') || n.includes('wifi') || n.includes('wlan') || n.includes('wireless')) return 80;
+    // macOS common Wi‑Fi interface.
+    if (n === 'en0') return 70;
+    // Linux common wireless prefixes.
+    if (n.startsWith('wl') || n.startsWith('wlan')) return 60;
+
+    // De-prioritize common virtual adapters.
+    if (
+      n.includes('docker') ||
+      n.includes('vmnet') ||
+      n.includes('vbox') ||
+      n.includes('virtual') ||
+      n.includes('hyper') ||
+      n.includes('wsl') ||
+      n.includes('tap') ||
+      n.includes('tun') ||
+      n.includes('utun') ||
+      n.includes('hamachi')
+    ) {
+      return -50;
+    }
+
+    return 0;
+  };
+
   for (const name of Object.keys(ifaces)) {
     for (const addr of ifaces[name] || []) {
       if (!addr || addr.family !== 'IPv4') continue;
       if (addr.internal) continue;
       const ip = (addr.address || '').toString().trim();
-      const score = scoreIp(ip);
+      const score = scoreIp(ip) + scoreInterfaceName(name);
       if (score < 0) continue;
-      candidates.push({ ip, score });
+      candidates.push({ ip, score, name });
     }
   }
 
@@ -2347,6 +2377,11 @@ function listLanUrls(actualPort) {
     urls.push(`http://${c.ip}:${actualPort}`);
   }
   return urls;
+}
+
+function pickPreferredLanUrl(actualPort) {
+  const urls = listLanUrls(actualPort);
+  return urls[0] || null;
 }
 
 function localDeviceMetaPath() {
@@ -2473,10 +2508,8 @@ function publishLocalDeviceNetworkInfo(actualPort, resolvedHost) {
   const deviceId = ensureLocalDeviceId();
   if (!deviceId) return;
 
-  const urls = listLanUrls(actualPort);
-  if (!urls.length) return;
-
-  const lanUrl = urls[0];
+  const lanUrl = pickPreferredLanUrl(actualPort);
+  if (!lanUrl) return;
   const token = uuidv4();
   try {
     db.prepare(
@@ -2502,10 +2535,10 @@ function startServer(options = {}) {
     const baseHost = resolvedHost === '0.0.0.0' ? 'localhost' : resolvedHost;
     console.log(`MediArchive Pro running at http://${baseHost}:${actualPort}`);
     if (resolvedHost === '0.0.0.0') {
-      const urls = listLanUrls(actualPort);
-      if (urls.length) {
-        console.log('LAN URLs:');
-        urls.forEach((u) => console.log(`  ${u}`));
+      const preferred = pickPreferredLanUrl(actualPort);
+      if (preferred) {
+        console.log('LAN URL:');
+        console.log(`  ${preferred}`);
       }
     }
 
