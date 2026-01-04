@@ -277,7 +277,10 @@ function looksLikeForeignPathForCurrentPlatform(rawPath) {
 
   // On non-Windows, a Windows drive path (C:\ / C:/) is never a valid local absolute path.
   if (process.platform !== 'win32') {
-    if (path.win32.isAbsolute(p)) return true;
+    // IMPORTANT: path.win32.isAbsolute('/Users/a') is also true, so we must be strict here.
+    // Treat only drive-letter paths or UNC paths as foreign.
+    if (/^[a-zA-Z]:[\\/]/.test(p)) return true;
+    if (/^\\\\/.test(p)) return true;
     return false;
   }
 
@@ -719,7 +722,10 @@ app.get('/api/transfer/stream-local', (req, res) => {
   }
 
   // Provide a filename hint for the pulling side.
-  res.setHeader('X-MA-Filename', path.basename(candidate));
+  // Node's header values must be latin1 and cannot contain many unicode chars.
+  // Use URL-encoding so any UTF-8 filename becomes ASCII-safe.
+  const safeName = encodeURIComponent(path.basename(candidate));
+  res.setHeader('X-MA-Filename', safeName);
   res.setHeader('Content-Disposition', contentDisposition(path.basename(candidate), { type: 'inline' }));
   res.setHeader('X-Content-Type-Options', 'nosniff');
   setKnownContentType(res, candidate);
@@ -773,7 +779,15 @@ async function handlePullFromDevice(req, res) {
     }
 
     const filenameHeader = resp.headers.get('x-ma-filename') || resp.headers.get('X-MA-Filename');
-    const originalName = (filenameHeader || '').toString().trim() || 'file';
+    let originalName = (filenameHeader || '').toString().trim() || 'file';
+    // If the sender URL-encodes the filename, decode it for nicer names (and correct ext parsing).
+    if (/%[0-9a-fA-F]{2}/.test(originalName)) {
+      try {
+        originalName = decodeURIComponent(originalName);
+      } catch {
+        // keep as-is
+      }
+    }
     const ext = safeFileExtension(originalName);
     const destName = `${uuidv4()}${ext}`;
     const destPath = path.join(getUploadsDir(), destName);
@@ -2271,6 +2285,21 @@ function writeLocalDeviceIdToMeta(deviceId) {
   }
 }
 
+function isLikelyLocalPathForPlatform(pathText) {
+  const p = (pathText || '').toString().trim();
+  if (!p) return false;
+  if (process.platform === 'win32') {
+    if (/^[a-zA-Z]:[\\/]/.test(p)) return true;
+    if (/^\\\\/.test(p)) return true;
+    if (/^\\/.test(p)) return true;
+    return false;
+  }
+  // macOS/Linux
+  if (/^[a-zA-Z]:[\\/]/.test(p)) return false;
+  if (/^\\\\/.test(p)) return false;
+  return path.posix.isAbsolute(p);
+}
+
 function ensureLocalDeviceId() {
   const userId = getOwnerId();
   if (!userId) return null;
@@ -2297,6 +2326,39 @@ function ensureLocalDeviceId() {
   if (byName?.device_id) {
     writeLocalDeviceIdToMeta(byName.device_id);
     return byName.device_id;
+  }
+
+  // Heuristic: choose the PC device that owns the most "local-looking" paths for this platform.
+  // This avoids publishing LAN URL onto a remote PC device after desktop↔desktop import.
+  try {
+    const candidates = db.prepare(
+      'SELECT device_id, created_at FROM devices WHERE user_id = ? AND device_type = ? ORDER BY created_at ASC'
+    ).all(userId, 'PC');
+
+    let bestId = null;
+    let bestScore = -1;
+    for (const c of candidates || []) {
+      const id = asNonEmptyString(c?.device_id);
+      if (!id) continue;
+      const rows = db.prepare(
+        "SELECT path FROM storage_locations WHERE device_id = ? AND storage_type = 'Local' LIMIT 2000"
+      ).all(id);
+      let score = 0;
+      for (const r of rows || []) {
+        if (isLikelyLocalPathForPlatform(r?.path)) score += 1;
+      }
+      if (score > bestScore) {
+        bestScore = score;
+        bestId = id;
+      }
+    }
+
+    if (bestId && bestScore > 0) {
+      writeLocalDeviceIdToMeta(bestId);
+      return bestId;
+    }
+  } catch {
+    // ignore
   }
 
   // Fallback: first PC device.

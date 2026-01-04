@@ -341,6 +341,26 @@ function isAndroidUriLocation(loc) {
   return loc?.access_info === 'android_uri' || /^content:\/\//i.test(pathText);
 }
 
+function isWindowsClient() {
+  const ua = (navigator.userAgent || '').toLowerCase();
+  return ua.includes('windows');
+}
+
+function looksLikeForeignPathForClient(pathText) {
+  const p = (pathText || '').toString().trim();
+  if (!p) return false;
+  // On Windows, mac/Linux absolute paths often start with /Users or /home.
+  if (isWindowsClient()) {
+    const lower = p.toLowerCase();
+    if (lower.startsWith('/users/') || lower.startsWith('/home/') || lower.startsWith('/volumes/')) return true;
+    return false;
+  }
+  // On mac/Linux, Windows drive letter / UNC paths are foreign.
+  if (/^[a-zA-Z]:[\\/]/.test(p)) return true;
+  if (/^\\\\/.test(p)) return true;
+  return false;
+}
+
 let cachedSharableOrigin = null;
 
 async function getSharableOrigin() {
@@ -1568,6 +1588,93 @@ function renderInspector() {
       `;
     } else {
     const filePath = loc.path || '';
+    if (looksLikeForeignPathForClient(filePath)) {
+      elements.previewBox.innerHTML = `
+        <div class="preview-empty">
+          ${typeIcon(item.media_type)}
+          <div style="margin-top:8px; font-weight:600;">该文件在其他设备上</div>
+          <div style="margin-top:6px; color: var(--muted); font-size: 12px;">
+            当前设备无法直接预览此路径。请点击右侧“打开/下载”，选择“下载到本机”或“流式传输”。
+          </div>
+        </div>
+      `;
+      elements.detailTitle.textContent = item.title || '';
+      const locLines = (item.locations || []).map((loc) => {
+        const status = isWebLocation(loc)
+          ? '在线'
+          : (loc.is_available ? '可用' : '不可用');
+        const dev = getDeviceName(loc.device_id);
+        const pathText = loc.path || '';
+        const pathHtml = isWebLocation(loc)
+          ? `<a class="link-web" href="${pathText}" target="_blank" rel="noopener noreferrer">${pathText}</a>`
+          : `<span>${pathText}</span>`;
+        return `<div style="margin-bottom: 10px;">
+          <div style="font-weight: 600;">${dev} · ${loc.storage_type}</div>
+          <div style="color: #94a3b8; font-size: 12px;">${pathHtml}</div>
+          <div style="color: #94a3b8; font-size: 12px;">状态：${status}</div>
+        </div>`;
+      }).join('');
+      elements.detailLocations.innerHTML = locLines || '<div style="color:#94a3b8;">暂无位置</div>';
+
+      elements.detailTags.innerHTML = '';
+      (item.tags || []).forEach((t) => {
+        const pill = document.createElement('span');
+        pill.className = 'tag-pill';
+        pill.innerHTML = `<span>${t.tag_name}</span><button type="button" aria-label="remove">✕</button>`;
+        pill.querySelector('button')?.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          const next = (item.tags || []).map((x) => x.tag_name).filter((name) => name !== t.tag_name);
+          await setItemTags(item.item_id, next);
+        });
+        elements.detailTags.appendChild(pill);
+      });
+
+      if (elements.tagPicker) {
+        elements.tagPicker.innerHTML = '';
+        const existing = new Set((item.tags || []).map((t) => t.tag_name));
+        (state.tags || []).forEach((t) => {
+          const wrap = document.createElement('span');
+          wrap.className = 'tag-option-wrap';
+
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'tag-option';
+          const selected = existing.has(t.tag_name);
+          if (selected) btn.classList.add('selected');
+          btn.textContent = `${selected ? '✓ ' : ''}${t.tag_name}`;
+          btn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const next = new Set((item.tags || []).map((x) => x.tag_name));
+            if (next.has(t.tag_name)) next.delete(t.tag_name);
+            else next.add(t.tag_name);
+            await setItemTags(item.item_id, Array.from(next));
+          });
+
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'tag-delete';
+          del.title = '删除标签';
+          del.setAttribute('aria-label', `删除标签 ${t.tag_name}`);
+          del.textContent = '✕';
+          del.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            await deleteTag(t);
+          });
+
+          wrap.appendChild(btn);
+          wrap.appendChild(del);
+          elements.tagPicker.appendChild(wrap);
+        });
+      }
+
+      elements.detailNote.value = item.description || '';
+      elements.openPrimaryBtn.disabled = !pickPrimaryLocation(item);
+      elements.shareBtn.disabled = !pickPrimaryLocation(item) || isAndroidOnly;
+      elements.deleteBtn.disabled = false;
+      return;
+    }
     const ext = (filePath.split('.').pop() || '').toLowerCase();
     const src = `/api/media/${encodeURIComponent(item.item_id)}/preview?locationId=${encodeURIComponent(loc.location_id)}`;
     const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'heic', 'heif'].includes(ext);
