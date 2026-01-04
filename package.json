@@ -32,6 +32,9 @@
     "directories": {
       "output": "dist"
     },
+    "win": {
+      "signAndEditExecutable": false
+    },
     "files": [
       "electron/**/*",
       "public/**/*",
