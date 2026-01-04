@@ -630,8 +630,66 @@ function resolveDeviceFileUrlFromLocation(locationId) {
   const loc = db.prepare('SELECT * FROM storage_locations WHERE location_id = ? LIMIT 1').get(locationId);
   if (!loc) return { error: 'Location not found' };
 
-  const deviceId = asNonEmptyString(loc.device_id);
-  if (!deviceId) return { error: 'Location has no device_id' };
+  const inferAndBackfillDeviceId = () => {
+    // 1) If the file exists on THIS machine, it's ours.
+    try {
+      const localCandidate = resolveExistingPath(loc.path);
+      if (localCandidate) {
+        const localId = ensureLocalDeviceId();
+        if (localId) {
+          db.prepare('UPDATE storage_locations SET device_id = ?, updated_at = ? WHERE location_id = ?')
+            .run(localId, now(), locationId);
+          return localId;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2) If other locations of the same item already have a device_id, reuse it.
+    try {
+      const rows = db.prepare(
+        `SELECT device_id FROM storage_locations
+         WHERE item_id = ? AND device_id IS NOT NULL
+         GROUP BY device_id
+         ORDER BY COUNT(1) DESC`
+      ).all(loc.item_id);
+      const ids = (rows || []).map((r) => asNonEmptyString(r.device_id)).filter(Boolean);
+      if (ids.length === 1) {
+        db.prepare('UPDATE storage_locations SET device_id = ?, updated_at = ? WHERE location_id = ?')
+          .run(ids[0], now(), locationId);
+        return ids[0];
+      }
+    } catch {
+      // ignore
+    }
+
+    // 3) If exactly one "other" device exists (common 2-desktop setup), use it.
+    try {
+      const localId = ensureLocalDeviceId();
+      const rows = db.prepare('SELECT device_id FROM devices ORDER BY created_at ASC').all();
+      const ids = (rows || []).map((r) => asNonEmptyString(r.device_id)).filter(Boolean);
+      const others = ids.filter((id) => !localId || id !== localId);
+      if (others.length === 1) {
+        db.prepare('UPDATE storage_locations SET device_id = ?, updated_at = ? WHERE location_id = ?')
+          .run(others[0], now(), locationId);
+        return others[0];
+      }
+    } catch {
+      // ignore
+    }
+
+    return null;
+  };
+
+  let deviceId = asNonEmptyString(loc.device_id);
+  if (!deviceId) deviceId = inferAndBackfillDeviceId();
+  if (!deviceId) {
+    return {
+      error: 'Location has no device_id',
+      hint: '该条记录缺少来源设备信息。请在“拥有该文件的设备”上运行一次同步/推送，让本地位置写入 device_id；或重新导入/重新索引该文件。'
+    };
+  }
 
   const dev = db.prepare('SELECT * FROM devices WHERE device_id = ? LIMIT 1').get(deviceId);
   const lanUrlRaw = asNonEmptyString(dev?.lan_url);
@@ -670,7 +728,7 @@ app.get('/api/transfer/stream-from-device', (req, res) => {
 
   const resolved = resolveDeviceFileUrlFromLocation(locationId);
   if (resolved.error) {
-    res.status(400).json({ error: resolved.error });
+    res.status(400).json({ error: resolved.error, hint: resolved.hint || undefined });
     return;
   }
 
@@ -698,9 +756,28 @@ app.get('/api/transfer/stream-local', (req, res) => {
     return;
   }
 
-  const devId = asNonEmptyString(loc.device_id);
+  let devId = asNonEmptyString(loc.device_id);
   if (!devId) {
-    res.status(400).json({ error: 'Location has no device_id' });
+    // If the file exists locally, we can safely bind it to the local device.
+    const candidate = resolveExistingPath(loc.path);
+    if (candidate) {
+      const localId = ensureLocalDeviceId();
+      if (localId) {
+        devId = localId;
+        try {
+          db.prepare('UPDATE storage_locations SET device_id = ?, updated_at = ? WHERE location_id = ?')
+            .run(localId, now(), locationId);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+  if (!devId) {
+    res.status(400).json({
+      error: 'Location has no device_id',
+      hint: '该条记录缺少来源设备信息，且无法在本机解析到文件路径。请在拥有该文件的设备上运行一次同步/推送。'
+    });
     return;
   }
 
@@ -748,7 +825,7 @@ async function handlePullFromDevice(req, res) {
 
   const resolved = resolveDeviceFileUrlFromLocation(locationId);
   if (resolved.error) {
-    res.status(400).json({ error: resolved.error });
+    res.status(400).json({ error: resolved.error, hint: resolved.hint || undefined });
     return;
   }
   const fileUrl = resolved.url;
@@ -1827,13 +1904,14 @@ app.post('/api/media', (req, res) => {
 
   const locationId = uuidv4();
   const cleanedPath = normalizeIncomingPath(mediaPath);
+  const effectiveDeviceId = (storageType === 'Local' && !deviceId) ? ensureLocalDeviceId() : (deviceId || null);
   db.prepare(`
     INSERT INTO storage_locations (location_id, item_id, device_id, storage_type, path, access_info, is_available, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     locationId,
     itemId,
-    deviceId || null,
+    effectiveDeviceId,
     storageType,
     cleanedPath,
     accessInfo || null,
@@ -1882,13 +1960,14 @@ app.post('/api/media/:id/location', (req, res) => {
   const availability = isAvailable === false ? 0 : 1;
   const locationId = uuidv4();
   const cleanedPath = normalizeIncomingPath(mediaPath);
+  const effectiveDeviceId = (storageType === 'Local' && !deviceId) ? ensureLocalDeviceId() : (deviceId || null);
   db.prepare(`
     INSERT INTO storage_locations (location_id, item_id, device_id, storage_type, path, access_info, is_available, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     locationId,
     id,
-    deviceId || null,
+    effectiveDeviceId,
     storageType,
     cleanedPath,
     accessInfo || null,
@@ -2089,6 +2168,61 @@ app.post('/api/storage/refresh', (req, res) => {
     }
   });
   res.json({ updated });
+});
+
+// One-click repair: backfill missing device_id for Local locations when the file exists on THIS machine.
+// Security: only allow localhost to trigger.
+app.post('/api/admin/repair-locations-device-id', (req, res) => {
+  const remote = req.socket?.remoteAddress || req.ip;
+  if (!isLoopbackAddress(remote)) {
+    res.status(403).json({ error: 'This operation is only allowed from localhost.' });
+    return;
+  }
+
+  const localDeviceId = ensureLocalDeviceId();
+  if (!localDeviceId) {
+    res.status(500).json({ error: 'Missing local device_id' });
+    return;
+  }
+
+  const rows = db.prepare(
+    `SELECT location_id, item_id, path, storage_type, device_id
+     FROM storage_locations
+     WHERE storage_type = 'Local' AND (device_id IS NULL OR TRIM(device_id) = '')`
+  ).all();
+
+  const updateStmt = db.prepare('UPDATE storage_locations SET device_id = ?, is_available = 1, updated_at = ? WHERE location_id = ?');
+  let fixed = 0;
+  let skippedAndroid = 0;
+  let skippedMissing = 0;
+
+  const tx = db.transaction(() => {
+    rows.forEach((r) => {
+      const p = (r?.path || '').toString();
+      if (isAndroidUriPath({ path: p })) {
+        skippedAndroid += 1;
+        return;
+      }
+      const candidate = resolveExistingPath(p);
+      if (!candidate) {
+        skippedMissing += 1;
+        return;
+      }
+      updateStmt.run(localDeviceId, now(), r.location_id);
+      fixed += 1;
+    });
+  });
+  tx();
+
+  res.json({
+    ok: true,
+    scanned: rows.length,
+    fixed,
+    skipped: {
+      android: skippedAndroid,
+      not_found: skippedMissing
+    }
+  });
 });
 
 app.get('/api/sync/export', (req, res) => {

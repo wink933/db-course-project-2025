@@ -36,6 +36,7 @@ const elements = {
   syncEndpointInput: document.getElementById('syncEndpointInput'),
   syncBtn: document.getElementById('syncBtn'),
   refreshAvailabilityBtn: document.getElementById('refreshAvailabilityBtn'),
+  repairDeviceIdBtn: document.getElementById('repairDeviceIdBtn'),
 
   showLanShareBtn: document.getElementById('showLanShareBtn'),
   lanSharePanel: document.getElementById('lanSharePanel'),
@@ -2150,6 +2151,27 @@ async function refreshAvailability() {
   await fetchMedia();
 }
 
+async function repairMissingDeviceIds() {
+  const ok = window.confirm('将扫描本机所有本地位置，自动补齐缺失的 device_id（仅当文件在本机能找到）。是否继续？');
+  if (!ok) return;
+
+  const res = await fetch('/api/admin/repair-locations-device-id', { method: 'POST' });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert([data?.error || '修复失败', data?.hint || ''].filter(Boolean).join('\n'));
+    return;
+  }
+
+  const fixed = Number(data?.fixed || 0);
+  const scanned = Number(data?.scanned || 0);
+  const skipped = data?.skipped || {};
+  const skippedMissing = Number(skipped?.not_found || 0);
+
+  alert(`修复完成：已扫描 ${scanned} 条，已补齐 ${fixed} 条。${skippedMissing ? `\n仍有 ${skippedMissing} 条因本机找不到文件而跳过。` : ''}`);
+  await fetchBootstrap();
+  await fetchMedia();
+}
+
 function bindEvents() {
     if (elements.sortBtn) {
       elements.sortBtn.addEventListener('click', async () => {
@@ -2196,6 +2218,9 @@ function bindEvents() {
   });
   elements.syncBtn.addEventListener('click', syncWithRemote);
   elements.refreshAvailabilityBtn.addEventListener('click', refreshAvailability);
+  if (elements.repairDeviceIdBtn) {
+    elements.repairDeviceIdBtn.addEventListener('click', repairMissingDeviceIds);
+  }
   if (elements.showLanShareBtn) {
     elements.showLanShareBtn.addEventListener('click', handleToggleLanShare);
   }
