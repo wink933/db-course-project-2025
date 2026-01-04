@@ -1923,11 +1923,21 @@ app.post('/api/sync/import', (req, res) => {
     { name: 'storage_locations', key: 'location_id' }
   ];
 
-  const insertOrReplace = (table, row) => {
-    const columns = Object.keys(row);
+  // NOTE: Do NOT use INSERT OR REPLACE here.
+  // In SQLite, REPLACE performs DELETE+INSERT, which can break foreign-key constraints
+  // (e.g. folders.parent_id uses ON DELETE RESTRICT) and can also cascade-delete children.
+  const upsertKnown = (table, pk, allowedCols, row) => {
+    if (!row || typeof row !== 'object') return;
+    const columns = allowedCols.filter((c) => Object.prototype.hasOwnProperty.call(row, c));
+    if (!columns.includes(pk)) return;
     const placeholders = columns.map(() => '?').join(',');
-    const sql = `INSERT OR REPLACE INTO ${table} (${columns.join(',')}) VALUES (${placeholders})`;
-    db.prepare(sql).run(...columns.map((col) => row[col]));
+    const updateCols = columns.filter((c) => c !== pk);
+    const updateClause = updateCols.length
+      ? `DO UPDATE SET ${updateCols.map((c) => `${c} = excluded.${c}`).join(',')}`
+      : 'DO NOTHING';
+
+    const sql = `INSERT INTO ${table} (${columns.join(',')}) VALUES (${placeholders}) ON CONFLICT(${pk}) ${updateClause}`;
+    db.prepare(sql).run(...columns.map((c) => row[c]));
   };
 
   const existsById = (table, idColumn, idValue) => {
@@ -1949,24 +1959,47 @@ app.post('/api/sync/import', (req, res) => {
         const r = safeRowObject(row);
         if (!r) return;
         if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
-        insertOrReplace('devices', r);
+        upsertKnown(
+          'devices',
+          'device_id',
+          ['device_id', 'user_id', 'device_name', 'device_type', 'device_key', 'lan_url', 'transfer_token', 'last_sync_time', 'created_at', 'updated_at'],
+          r
+        );
       });
 
       // 2) folders (two-phase to avoid parent_id FK failures)
       const folderRows = Array.isArray(payload.folders) ? payload.folders.map(safeRowObject).filter(Boolean) : [];
+      const folderParentById = new Map();
       folderRows.forEach((r) => {
-        if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
-        // Phase 1: insert shells without parent_id
-        r.parent_id = null;
-        insertOrReplace('folders', r);
+        if (!r?.folder_id) return;
+        folderParentById.set(r.folder_id, (r.parent_id || '').toString().trim() || null);
       });
+
+      // Phase 1: upsert shells with parent_id = NULL (no FK required)
       folderRows.forEach((orig) => {
         const r = { ...orig };
         if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
-        // Phase 2: restore parent_id only if it exists
-        const parentId = (r.parent_id || '').toString().trim() || null;
-        r.parent_id = parentId && existsById('folders', 'folder_id', parentId) ? parentId : null;
-        insertOrReplace('folders', r);
+        r.parent_id = null;
+        upsertKnown(
+          'folders',
+          'folder_id',
+          ['folder_id', 'user_id', 'parent_id', 'folder_name', 'sort_order', 'created_at', 'updated_at'],
+          r
+        );
+      });
+
+      // Phase 2: backfill parent_id (only if parent exists)
+      folderRows.forEach((orig) => {
+        const r = { ...orig };
+        if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
+        const wantedParent = folderParentById.get(r.folder_id) || null;
+        r.parent_id = wantedParent && existsById('folders', 'folder_id', wantedParent) ? wantedParent : null;
+        upsertKnown(
+          'folders',
+          'folder_id',
+          ['folder_id', 'user_id', 'parent_id', 'folder_name', 'sort_order', 'created_at', 'updated_at'],
+          r
+        );
       });
 
       // 3) tags
@@ -1974,7 +2007,12 @@ app.post('/api/sync/import', (req, res) => {
         const r = safeRowObject(row);
         if (!r) return;
         if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
-        insertOrReplace('tags', r);
+        upsertKnown(
+          'tags',
+          'tag_id',
+          ['tag_id', 'user_id', 'tag_name', 'created_at', 'updated_at'],
+          r
+        );
       });
 
       // 4) media_items (sanitize folder_id FK)
@@ -1984,7 +2022,12 @@ app.post('/api/sync/import', (req, res) => {
         if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
         const folderId = (r.folder_id || '').toString().trim() || null;
         r.folder_id = folderId && existsById('folders', 'folder_id', folderId) ? folderId : null;
-        insertOrReplace('media_items', r);
+        upsertKnown(
+          'media_items',
+          'item_id',
+          ['item_id', 'user_id', 'folder_id', 'title', 'media_type', 'description', 'created_at', 'updated_at', 'deleted_at'],
+          r
+        );
       });
 
       // 5) storage_locations (sanitize item_id/device_id FK)
@@ -1999,7 +2042,12 @@ app.post('/api/sync/import', (req, res) => {
         if (Object.prototype.hasOwnProperty.call(r, 'path')) {
           r.path = normalizeIncomingPath(r.path);
         }
-        insertOrReplace('storage_locations', r);
+        upsertKnown(
+          'storage_locations',
+          'location_id',
+          ['location_id', 'item_id', 'device_id', 'storage_type', 'path', 'access_info', 'is_available', 'created_at', 'updated_at'],
+          r
+        );
       });
 
       // 6) media_tags (sanitize FK)
