@@ -10,6 +10,7 @@ const { pipeline } = require('stream/promises');
 const QRCode = require('qrcode');
 const Database = require('better-sqlite3');
 const { v4: uuidv4 } = require('uuid');
+const { fileURLToPath } = require('url');
 
 const app = express();
 const dbPath = process.env.DB_PATH
@@ -118,6 +119,22 @@ const db = initializeDatabase();
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// Desktop-to-desktop sync is triggered from the Web UI / Electron renderer.
+// When syncing with another machine, it becomes a cross-origin request and must pass CORS.
+function applySyncCors(req, res, next) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+}
+
+app.use('/api/sync', applySyncCors);
 
 function ensureDirSync(dirPath) {
   try {
@@ -447,21 +464,8 @@ app.get('/api/media/:itemId/download', (req, res) => {
     return;
   }
 
-  const normalized = path.normalize(location.path);
-  if (!path.isAbsolute(normalized)) {
-    res.status(400).json({ error: 'Invalid stored path' });
-    return;
-  }
-
-  let candidate = normalized;
-  try {
-    const realPath = fs.realpathSync.native(normalized);
-    if (ensureFileExists(realPath)) candidate = realPath;
-  } catch {
-    // ignore
-  }
-
-  if (!ensureFileExists(candidate)) {
+  const candidate = resolveExistingPath(location.path);
+  if (!candidate) {
     res.status(404).json({ error: 'File not found' });
     return;
   }
@@ -517,21 +521,8 @@ app.post('/api/media/:itemId/open', (req, res) => {
     return;
   }
 
-  const normalized = path.normalize(location.path);
-  if (!path.isAbsolute(normalized)) {
-    res.status(400).json({ error: 'Invalid stored path' });
-    return;
-  }
-
-  let candidate = normalized;
-  try {
-    const realPath = fs.realpathSync.native(normalized);
-    if (ensureFileExists(realPath)) candidate = realPath;
-  } catch {
-    // ignore
-  }
-
-  if (!ensureFileExists(candidate)) {
+  const candidate = resolveExistingPath(location.path);
+  if (!candidate) {
     res.status(404).json({ error: 'File not found' });
     return;
   }
@@ -658,9 +649,33 @@ function now() {
   return new Date().toISOString();
 }
 
+function stripWrappingQuotes(raw) {
+  const text = (raw ?? '').toString().trim();
+  if (!text) return '';
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    return text.slice(1, -1).trim();
+  }
+  return text;
+}
+
+function normalizeIncomingPath(raw) {
+  let text = stripWrappingQuotes(raw);
+  if (!text) return '';
+
+  if (/^file:\/\//i.test(text)) {
+    try {
+      return fileURLToPath(text);
+    } catch {
+      // fall through
+    }
+  }
+
+  return text;
+}
+
 function safeExistsSync(targetPath) {
   try {
-    return fs.existsSync(targetPath);
+    return fs.existsSync(normalizeIncomingPath(targetPath));
   } catch (error) {
     return false;
   }
@@ -676,7 +691,7 @@ function safeStatSync(targetPath) {
 
 function resolveExistingPath(targetPath) {
   if (!targetPath) return null;
-  const normalized = path.normalize(targetPath);
+  const normalized = path.normalize(normalizeIncomingPath(targetPath));
   if (!path.isAbsolute(normalized)) return null;
   try {
     const real = fs.realpathSync.native(normalized);
@@ -961,7 +976,7 @@ function upsertStorageLocation(location, itemId, deviceIdFallback) {
   if (!locationId) return null;
 
   const storageType = asNonEmptyString(location?.storage_type) || 'Web';
-  const pathValue = asNonEmptyString(location?.path);
+  const pathValue = asNonEmptyString(normalizeIncomingPath(location?.path));
   if (!pathValue) return null;
 
   const deviceIdRaw = asNonEmptyString(location?.device_id);
@@ -1541,6 +1556,7 @@ app.post('/api/media', (req, res) => {
   `).run(itemId, userId, folderId || null, title, mediaType, description || null, now(), now());
 
   const locationId = uuidv4();
+  const cleanedPath = normalizeIncomingPath(mediaPath);
   db.prepare(`
     INSERT INTO storage_locations (location_id, item_id, device_id, storage_type, path, access_info, is_available, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1549,7 +1565,7 @@ app.post('/api/media', (req, res) => {
     itemId,
     deviceId || null,
     storageType,
-    mediaPath,
+    cleanedPath,
     accessInfo || null,
     availability,
     now(),
@@ -1595,6 +1611,7 @@ app.post('/api/media/:id/location', (req, res) => {
   const { storageType, path: mediaPath, accessInfo, deviceId, isAvailable } = req.body;
   const availability = isAvailable === false ? 0 : 1;
   const locationId = uuidv4();
+  const cleanedPath = normalizeIncomingPath(mediaPath);
   db.prepare(`
     INSERT INTO storage_locations (location_id, item_id, device_id, storage_type, path, access_info, is_available, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1603,7 +1620,7 @@ app.post('/api/media/:id/location', (req, res) => {
     id,
     deviceId || null,
     storageType,
-    mediaPath,
+    cleanedPath,
     accessInfo || null,
     availability,
     now(),

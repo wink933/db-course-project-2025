@@ -164,6 +164,47 @@ function saveCollapsedFolderIds() {
   } catch {}
 }
 
+function stripWrappingQuotes(raw) {
+  const text = (raw ?? '').toString().trim();
+  if (!text) return '';
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    return text.slice(1, -1).trim();
+  }
+  return text;
+}
+
+function normalizeUserPathInput(raw) {
+  let text = stripWrappingQuotes(raw);
+  if (!text) return '';
+
+  // Support file:// URIs (sometimes used when copying paths).
+  if (/^file:\/\//i.test(text)) {
+    try {
+      const u = new URL(text);
+      if (u.protocol === 'file:') {
+        let p = decodeURIComponent(u.pathname || '');
+        // Windows file URL: /C:/path -> C:/path
+        if (/^\/[a-zA-Z]:\//.test(p)) p = p.slice(1);
+        return p;
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  return text;
+}
+
+function normalizeSyncEndpoint(raw) {
+  let text = stripWrappingQuotes(raw);
+  if (!text) return '';
+  text = text.replace(/\/+$/, '');
+  if (!/^https?:\/\//i.test(text)) {
+    text = `http://${text}`;
+  }
+  return text;
+}
+
 function openTransferModal(item, loc) {
   if (!elements.transferModal) return;
   transferModalState = { item, loc };
@@ -1628,7 +1669,7 @@ async function saveEdit() {
     body: JSON.stringify({ tags })
   });
 
-  const pathVal = elements.editMediaPathInput.value.trim();
+  const pathVal = normalizeUserPathInput(elements.editMediaPathInput.value);
   if (pathVal) {
     await fetch(`/api/media/${editingId}/location`, {
       method: 'POST',
@@ -1757,7 +1798,7 @@ async function addMedia() {
   }
 
   const storageType = elements.storageTypeInput.value;
-  const rawPath = elements.mediaPathInput.value.trim();
+  const rawPath = normalizeUserPathInput(elements.mediaPathInput.value);
   if (!title && !selectedFile && rawPath) {
     const lastSeg = rawPath
       .replace(/[/\\]+$/, '')
@@ -1851,16 +1892,35 @@ function closeAddModal() {
 }
 
 async function syncWithRemote() {
-  const endpoint = elements.syncEndpointInput.value.trim();
+  const endpoint = normalizeSyncEndpoint(elements.syncEndpointInput.value);
   if (!endpoint) return;
-  const exportRes = await fetch(`${endpoint}/api/sync/export`);
-  const exportData = await exportRes.json();
+  try {
+    const exportRes = await fetch(`${endpoint}/api/sync/export`);
+    if (!exportRes.ok) {
+      const text = await exportRes.text().catch(() => '');
+      alert(`同步失败：远端导出接口返回 ${exportRes.status} ${text || ''}`.trim());
+      return;
+    }
+    const exportData = await exportRes.json().catch(() => ({}));
+    if (!exportData?.payload) {
+      alert('同步失败：远端导出数据格式不正确（缺少 payload）。');
+      return;
+    }
 
-  await fetch('/api/sync/import', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ payload: exportData.payload })
-  });
+    const importRes = await fetch('/api/sync/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ payload: exportData.payload })
+    });
+    if (!importRes.ok) {
+      const text = await importRes.text().catch(() => '');
+      alert(`同步失败：本机导入接口返回 ${importRes.status} ${text || ''}`.trim());
+      return;
+    }
+  } catch (e) {
+    alert(`同步失败：${e?.message || e}`);
+    return;
+  }
 
   await fetchBootstrap();
   await fetchMedia();
@@ -2508,24 +2568,50 @@ function bindEvents() {
     const files = e.dataTransfer?.files || [];
     if (!files.length) return;
     for (const file of files) {
-      const filePath = file.path;
-      if (!filePath) continue;
-      const title = file.name || filePath.split(/[/\\]/).pop();
-      await fetch('/api/media', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title,
-          mediaType: 'Doc',
-          description: '',
-          folderId: elements.mediaFolderInput.value,
-          tags: [],
-          storageType: 'Local',
-          path: filePath,
-          accessInfo: '',
-          deviceId: elements.mediaDeviceInput.value || null
-        })
-      });
+      const filePath = normalizeUserPathInput(file.path);
+      const title = (file?.name || '').toString().trim() || (filePath ? filePath.split(/[/\\]/).pop() : '未命名');
+
+      // In standard browsers (or some hardened environments), file.path may be empty.
+      // Fallback to uploading a copy so drag-drop still works.
+      try {
+        if (filePath) {
+          const res = await fetch('/api/media', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              title,
+              mediaType: 'Doc',
+              description: '',
+              folderId: elements.mediaFolderInput.value,
+              tags: [],
+              storageType: 'Local',
+              path: filePath,
+              accessInfo: '',
+              deviceId: elements.mediaDeviceInput.value || null
+            })
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            alert(data?.error || '拖拽导入失败');
+          }
+        } else {
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('title', title);
+          fd.append('mediaType', 'Doc');
+          fd.append('description', '');
+          fd.append('folderId', elements.mediaFolderInput.value);
+          fd.append('tags', JSON.stringify([]));
+
+          const res = await fetch('/api/media/upload', { method: 'POST', body: fd });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            alert(data?.error || '拖拽上传失败');
+          }
+        }
+      } catch (err) {
+        alert(`拖拽导入失败：${err?.message || err}`);
+      }
     }
     await fetchBootstrap();
     await fetchMedia();
