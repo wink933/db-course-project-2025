@@ -125,6 +125,8 @@ let editingId = null;
 let folderContextTarget = null;
 let renamingFolderId = null;
 let renamingOriginalName = '';
+let renamingDeviceId = null;
+let renamingDeviceOriginalName = '';
 let searchDebounceTimer = null;
 let noteDebounceTimer = null;
 
@@ -229,9 +231,16 @@ async function handleTransferDownload() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ locationId: loc.location_id })
     });
-    const data = await res.json().catch(() => ({}));
+    let data = null;
+    let text = '';
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+      text = await res.text().catch(() => '');
+    }
     if (!res.ok) {
-      alert(data?.error || '下载失败');
+      alert(data?.error || text || '下载失败');
       return;
     }
 
@@ -244,7 +253,12 @@ async function handleTransferDownload() {
       await fetch(openUrl, { method: 'POST' }).catch(() => {});
     }
   } catch (e) {
-    alert(`下载失败：${e?.message || e}`);
+    const msg = e?.message || String(e);
+    if (/Failed to fetch/i.test(msg)) {
+      alert('下载失败：无法连接本机服务或服务已退出。\n\n请确认：\n- 你是在桌面端（Electron 窗口或 localhost 页面）操作\n- 桌面端服务仍在运行\n- 若为跨设备浏览器访问，该操作默认被限制');
+      return;
+    }
+    alert(`下载失败：${msg}`);
   }
 }
 
@@ -1172,6 +1186,90 @@ async function commitInlineRename(nextName) {
     alert(`重命名请求失败：${error?.message || '网络错误'}`);
     await fetchBootstrap();
   }
+}
+
+function cancelDeviceInlineRename() {
+  renamingDeviceId = null;
+  renamingDeviceOriginalName = '';
+  renderDevices();
+}
+
+async function commitDeviceInlineRename(nextName) {
+  const targetId = renamingDeviceId;
+  const originalName = renamingDeviceOriginalName;
+  renamingDeviceId = null;
+  renamingDeviceOriginalName = '';
+
+  const trimmed = (nextName || '').trim();
+  if (!targetId) return;
+  if (!trimmed || trimmed === originalName) {
+    await fetchBootstrap();
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/devices/${encodeURIComponent(targetId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceName: trimmed })
+    });
+    if (!res.ok) {
+      const msg = await res.json().catch(() => ({}));
+      alert(msg?.error || '重命名失败');
+      await fetchBootstrap();
+      return;
+    }
+    await fetchBootstrap();
+    await fetchMedia();
+  } catch (error) {
+    alert(`重命名请求失败：${error?.message || '网络错误'}`);
+    await fetchBootstrap();
+  }
+}
+
+function startInlineRenameDevice(targetId) {
+  if (!targetId) return;
+  if (renamingDeviceId && renamingDeviceId !== targetId) {
+    cancelDeviceInlineRename();
+  }
+
+  const li = elements.deviceList.querySelector(`li[data-id="${CSS.escape(targetId)}"]`);
+  if (!li) return;
+
+  const name = li.querySelector('.device-name');
+  if (!name) return;
+
+  renamingDeviceId = targetId;
+  renamingDeviceOriginalName = name.textContent || '';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  // Reuse folder rename input style.
+  input.className = 'folder-rename-input';
+  input.value = renamingDeviceOriginalName;
+
+  name.textContent = '';
+  name.appendChild(input);
+  input.focus();
+  input.select();
+
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('contextmenu', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitDeviceInlineRename(input.value);
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelDeviceInlineRename();
+    }
+    e.stopPropagation();
+  });
+  input.addEventListener('blur', () => {
+    if (!renamingDeviceId) return;
+    commitDeviceInlineRename(input.value);
+  });
 }
 
 function startInlineRenameFolder(targetId) {
@@ -2631,6 +2729,15 @@ function bindEvents() {
     if (!target) return;
     if (!target.dataset.id) return;
     startInlineRenameFolder(target.dataset.id);
+  });
+
+  elements.deviceList.addEventListener('dblclick', (e) => {
+    const delBtn = e.target.closest('button.device-delete');
+    if (delBtn) return;
+    const target = e.target.closest('li[data-id]');
+    const deviceId = target?.dataset?.id || '';
+    if (!deviceId) return;
+    startInlineRenameDevice(deviceId);
   });
 
   document.addEventListener('paste', async (e) => {

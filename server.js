@@ -104,8 +104,16 @@ function initializeDatabase() {
       .run(userId, 'owner');
 
     const deviceId = uuidv4();
+    const hostLabel = (() => {
+      try {
+        const h = (os.hostname?.() || '').toString().trim();
+        return h || '本机设备';
+      } catch {
+        return '本机设备';
+      }
+    })();
     db.prepare('INSERT INTO devices (device_id, user_id, device_name, device_type, last_sync_time) VALUES (?, ?, ?, ?, ?)')
-      .run(deviceId, userId, '本机设备', 'PC', new Date().toISOString());
+      .run(deviceId, userId, hostLabel, 'PC', new Date().toISOString());
 
     const folderId = uuidv4();
     db.prepare('INSERT INTO folders (folder_id, user_id, parent_id, folder_name) VALUES (?, ?, ?, ?)')
@@ -223,8 +231,8 @@ function openWithDefaultApp(targetPath) {
     return;
   }
   if (platform === 'win32') {
-    const quoted = `"${targetPath}"`;
-    const child = spawn('cmd', ['/c', 'start', '', quoted], { detached: true, stdio: 'ignore', windowsHide: true });
+    // explorer.exe is generally more reliable than `cmd /c start` for paths with special chars.
+    const child = spawn('explorer.exe', [targetPath], { detached: true, stdio: 'ignore', windowsHide: true });
     child.unref();
     return;
   }
@@ -600,12 +608,18 @@ app.post('/api/transfer/pull-from-phone', async (req, res) => {
   const defaultDeviceId = deviceRow?.device_id || null;
 
   try {
+    const controller = new AbortController();
+    const timeoutMs = 20_000;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
     const resp = await fetch(fileUrl, {
       method: 'GET',
       headers: {
         'Accept': '*/*'
-      }
+      },
+      signal: controller.signal
     });
+    clearTimeout(timer);
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
@@ -641,7 +655,13 @@ app.post('/api/transfer/pull-from-phone', async (req, res) => {
 
     res.json({ ok: true, item_id: itemId, location_id: newLocationId, path: destAbs });
   } catch (e) {
-    res.status(500).json({ error: e?.message || 'Failed to pull from phone' });
+    const message = e?.name === 'AbortError'
+      ? 'Phone fetch timed out. Ensure phone and PC are on the same Wi‑Fi and the phone app is open.'
+      : (e?.message || 'Failed to pull from phone');
+    res.status(502).json({
+      error: message,
+      hint: 'Check phone LAN URL (devices.lan_url), firewall, and that the phone in-app LAN server is reachable.'
+    });
   }
 });
 
@@ -733,8 +753,30 @@ function revealInFileManager(targetPath) {
 }
 
 function getOwnerId() {
-  const row = db.prepare('SELECT user_id FROM users ORDER BY created_at LIMIT 1').get();
-  return row ? row.user_id : null;
+  // Prefer the user that actually owns most data. This protects against accidental
+  // multi-user rows introduced by desktop-to-desktop import.
+  const row = db.prepare(
+    `
+    SELECT
+      u.user_id,
+      COALESCE(mi.cnt, 0) AS media_cnt,
+      COALESCE(dv.cnt, 0) AS device_cnt
+    FROM users u
+    LEFT JOIN (
+      SELECT user_id, COUNT(1) AS cnt
+      FROM media_items
+      GROUP BY user_id
+    ) mi ON mi.user_id = u.user_id
+    LEFT JOIN (
+      SELECT user_id, COUNT(1) AS cnt
+      FROM devices
+      GROUP BY user_id
+    ) dv ON dv.user_id = u.user_id
+    ORDER BY media_cnt DESC, device_cnt DESC, u.created_at ASC
+    LIMIT 1
+    `
+  ).get();
+  return row?.user_id || null;
 }
 
 function ensureTagIds(userId, tagNames) {
@@ -1507,6 +1549,28 @@ app.post('/api/devices', (req, res) => {
   res.json({ device_id: deviceId });
 });
 
+app.put('/api/devices/:id', (req, res) => {
+  const userId = getOwnerId();
+  const { id } = req.params;
+  const name = (req.body?.deviceName || '').toString().trim();
+  if (!id) {
+    res.status(400).json({ error: 'Missing device id' });
+    return;
+  }
+  if (!name) {
+    res.status(400).json({ error: 'Missing deviceName' });
+    return;
+  }
+  const exists = db.prepare('SELECT device_id FROM devices WHERE user_id = ? AND device_id = ?').get(userId, id);
+  if (!exists) {
+    res.status(404).json({ error: 'Device not found' });
+    return;
+  }
+  db.prepare('UPDATE devices SET device_name = ?, updated_at = ? WHERE user_id = ? AND device_id = ?')
+    .run(name, now(), userId, id);
+  res.json({ ok: true });
+});
+
 app.delete('/api/devices/:id', (req, res) => {
   const userId = getOwnerId();
   const { id } = req.params;
@@ -1827,7 +1891,6 @@ app.get('/api/sync/export', (req, res) => {
   const params = since ? [since] : [];
 
   const payload = {
-    users: db.prepare(`SELECT * FROM users WHERE ${filter}`).all(...params),
     devices: db.prepare(`SELECT * FROM devices WHERE ${filter}`).all(...params),
     folders: db.prepare(`SELECT * FROM folders WHERE ${filter} ORDER BY (parent_id IS NOT NULL) ASC, parent_id, sort_order, created_at`).all(...params),
     tags: db.prepare(`SELECT * FROM tags WHERE ${filter}`).all(...params),
@@ -1846,8 +1909,13 @@ app.post('/api/sync/import', (req, res) => {
     return;
   }
 
+  const ownerId = getOwnerId();
+  if (!ownerId) {
+    res.status(500).json({ error: 'Missing owner user_id' });
+    return;
+  }
+
   const tables = [
-    { name: 'users', key: 'user_id' },
     { name: 'devices', key: 'device_id' },
     { name: 'folders', key: 'folder_id' },
     { name: 'tags', key: 'tag_id' },
@@ -1865,7 +1933,14 @@ app.post('/api/sync/import', (req, res) => {
   const transaction = db.transaction(() => {
     tables.forEach(({ name }) => {
       const rows = payload[name] || [];
-      rows.forEach((row) => insertOrReplace(name, row));
+      rows.forEach((row) => {
+        if (!row || typeof row !== 'object') return;
+        // Force single-user model on import to avoid cross-machine user_id fragmentation.
+        if (Object.prototype.hasOwnProperty.call(row, 'user_id')) {
+          row.user_id = ownerId;
+        }
+        insertOrReplace(name, row);
+      });
     });
 
     if (Array.isArray(payload.media_tags)) {
