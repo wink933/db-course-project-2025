@@ -1930,30 +1930,100 @@ app.post('/api/sync/import', (req, res) => {
     db.prepare(sql).run(...columns.map((col) => row[col]));
   };
 
-  const transaction = db.transaction(() => {
-    tables.forEach(({ name }) => {
-      const rows = payload[name] || [];
-      rows.forEach((row) => {
-        if (!row || typeof row !== 'object') return;
-        // Force single-user model on import to avoid cross-machine user_id fragmentation.
-        if (Object.prototype.hasOwnProperty.call(row, 'user_id')) {
-          row.user_id = ownerId;
-        }
-        insertOrReplace(name, row);
+  const existsById = (table, idColumn, idValue) => {
+    if (!idValue) return false;
+    try {
+      const row = db.prepare(`SELECT 1 AS ok FROM ${table} WHERE ${idColumn} = ? LIMIT 1`).get(idValue);
+      return !!row;
+    } catch {
+      return false;
+    }
+  };
+
+  const safeRowObject = (row) => (row && typeof row === 'object' ? { ...row } : null);
+
+  try {
+    const transaction = db.transaction(() => {
+      // 1) devices
+      (payload.devices || []).forEach((row) => {
+        const r = safeRowObject(row);
+        if (!r) return;
+        if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
+        insertOrReplace('devices', r);
       });
+
+      // 2) folders (two-phase to avoid parent_id FK failures)
+      const folderRows = Array.isArray(payload.folders) ? payload.folders.map(safeRowObject).filter(Boolean) : [];
+      folderRows.forEach((r) => {
+        if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
+        // Phase 1: insert shells without parent_id
+        r.parent_id = null;
+        insertOrReplace('folders', r);
+      });
+      folderRows.forEach((orig) => {
+        const r = { ...orig };
+        if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
+        // Phase 2: restore parent_id only if it exists
+        const parentId = (r.parent_id || '').toString().trim() || null;
+        r.parent_id = parentId && existsById('folders', 'folder_id', parentId) ? parentId : null;
+        insertOrReplace('folders', r);
+      });
+
+      // 3) tags
+      (payload.tags || []).forEach((row) => {
+        const r = safeRowObject(row);
+        if (!r) return;
+        if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
+        insertOrReplace('tags', r);
+      });
+
+      // 4) media_items (sanitize folder_id FK)
+      (payload.media_items || []).forEach((row) => {
+        const r = safeRowObject(row);
+        if (!r) return;
+        if (Object.prototype.hasOwnProperty.call(r, 'user_id')) r.user_id = ownerId;
+        const folderId = (r.folder_id || '').toString().trim() || null;
+        r.folder_id = folderId && existsById('folders', 'folder_id', folderId) ? folderId : null;
+        insertOrReplace('media_items', r);
+      });
+
+      // 5) storage_locations (sanitize item_id/device_id FK)
+      (payload.storage_locations || []).forEach((row) => {
+        const r = safeRowObject(row);
+        if (!r) return;
+        const itemId = (r.item_id || '').toString().trim();
+        if (!itemId || !existsById('media_items', 'item_id', itemId)) return;
+        const deviceId = (r.device_id || '').toString().trim() || null;
+        r.device_id = deviceId && existsById('devices', 'device_id', deviceId) ? deviceId : null;
+        // Keep path normalization consistent with the rest of the server.
+        if (Object.prototype.hasOwnProperty.call(r, 'path')) {
+          r.path = normalizeIncomingPath(r.path);
+        }
+        insertOrReplace('storage_locations', r);
+      });
+
+      // 6) media_tags (sanitize FK)
+      if (Array.isArray(payload.media_tags)) {
+        payload.media_tags.forEach((row) => {
+          const itemId = (row?.item_id || '').toString().trim();
+          const tagId = (row?.tag_id || '').toString().trim();
+          if (!itemId || !tagId) return;
+          if (!existsById('media_items', 'item_id', itemId)) return;
+          if (!existsById('tags', 'tag_id', tagId)) return;
+          db.prepare('INSERT OR IGNORE INTO media_tags (item_id, tag_id) VALUES (?, ?)')
+            .run(itemId, tagId);
+        });
+      }
     });
 
-    if (Array.isArray(payload.media_tags)) {
-      payload.media_tags.forEach((row) => {
-        db.prepare('INSERT OR IGNORE INTO media_tags (item_id, tag_id) VALUES (?, ?)')
-          .run(row.item_id, row.tag_id);
-      });
-    }
-  });
-
-  transaction();
-
-  res.json({ ok: true, imported_at: now() });
+    transaction();
+    res.json({ ok: true, imported_at: now() });
+  } catch (error) {
+    res.status(500).json({
+      error: error?.message || 'Import failed',
+      hint: 'This is usually caused by foreign key constraints during import (e.g., folder parent inserted after child). Please retry after updating both clients.'
+    });
+  }
 });
 
 app.get('/api/health', (req, res) => {
