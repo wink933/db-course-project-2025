@@ -2287,6 +2287,9 @@ app.get('/api/health', (req, res) => {
 const port = process.env.PORT || 4000;
 const host = process.env.HOST || '127.0.0.1';
 
+let lanPublishTimer = null;
+let lastPreferredLanUrl = null;
+
 function listLanUrls(actualPort) {
   const ifaces = os.networkInterfaces();
   const candidates = [];
@@ -2548,6 +2551,45 @@ function startServer(options = {}) {
     } catch {
       // ignore
     }
+
+    // Network can change (Wi‑Fi ↔ hotspot). Refresh lan_url periodically so peers don't keep using a stale IP.
+    if (resolvedHost === '0.0.0.0') {
+      try {
+        lastPreferredLanUrl = pickPreferredLanUrl(actualPort);
+      } catch {
+        lastPreferredLanUrl = null;
+      }
+
+      if (!lanPublishTimer) {
+        lanPublishTimer = setInterval(() => {
+          const currentPort = server?.port || actualPort;
+          let preferred = null;
+          try {
+            preferred = pickPreferredLanUrl(currentPort);
+          } catch {
+            preferred = null;
+          }
+
+          if (preferred && preferred !== lastPreferredLanUrl) {
+            lastPreferredLanUrl = preferred;
+            try {
+              publishLocalDeviceNetworkInfo(currentPort, '0.0.0.0');
+            } catch {
+              // ignore
+            }
+            console.log('LAN URL updated:');
+            console.log(`  ${preferred}`);
+          }
+        }, 15_000);
+
+        // Don't keep Node running just because of the timer (CLI/when app quits).
+        try {
+          lanPublishTimer.unref?.();
+        } catch {
+          // ignore
+        }
+      }
+    }
   });
 
   // Prevent unhandled 'error' from crashing Electron main-process.
@@ -2580,6 +2622,14 @@ function startServer(options = {}) {
 
 function stopServer() {
   if (!serverInstance) return;
+  if (lanPublishTimer) {
+    try {
+      clearInterval(lanPublishTimer);
+    } catch {
+      // ignore
+    }
+    lanPublishTimer = null;
+  }
   serverInstance.close(() => {
     serverInstance = null;
   });
